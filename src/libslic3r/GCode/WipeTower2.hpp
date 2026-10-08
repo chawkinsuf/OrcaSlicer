@@ -239,9 +239,12 @@ private:
     bool m_tower_framework = false; // internal support rib
     bool  m_isolate_materials = false; // each category gets its own walled section
     float m_min_section_depth = 0.f;   // minimum interior depth of a section (mm)
+    // Isolation only changes the tower when there is more than one section; with a single
+    // category the tower is printed exactly as without isolation.
+    bool isolation_active() const { return m_isolate_materials && m_wipe_tower_blocks.size() > 1; }
     // Isolation: Y distance between two neighbouring section interiors = their two wall lines
     // plus one line of clear air. Depends on m_perimeter_width, which set_extruder() sets.
-    float section_spacing() const { return m_isolate_materials ? 3.f * m_perimeter_width : 0.f; }
+    float section_spacing() const { return isolation_active() ? 3.f * m_perimeter_width : 0.f; }
     bool m_enable_tower_interface_features = false;
     bool m_enable_tower_interface_cooldown_during_tower = false;
     size_t m_cur_layer_id;

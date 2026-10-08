@@ -1777,6 +1777,17 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
                 }
         }
 
+        if (m_config.prime_tower_isolate_materials && warning != nullptr && warning->string.empty()) {
+            std::set<int> categories;
+            for (unsigned int extruder : extruders)
+                categories.insert(extruder < m_config.filament_adhesiveness_category.values.size()
+                                      ? m_config.filament_adhesiveness_category.values[extruder] : 0);
+            if (categories.size() < 2) {
+                warning->string  = L("Isolate materials in prime tower has no effect: all filaments in use share the same adhesiveness category.");
+                warning->opt_key = "prime_tower_isolate_materials";
+            }
+        }
+
         if (! m_config.use_relative_e_distances)
             return { L("The Wipe Tower is currently only supported with the relative extruder addressing (use_relative_e_distances=1).") };
 

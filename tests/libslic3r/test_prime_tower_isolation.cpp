@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "test_utils.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
@@ -29,6 +30,13 @@ static DynamicPrintConfig two_material_config(bool isolate)
     config.set("initial_layer_print_height", 0.2);
     config.set("enable_support", false);
     config.set("skirt_loops", 0);
+    config.set("layer_change_gcode", "G92 E0"); // required by Print::validate with relative E
+    // Print::validate keeps only the last warning it finds; keep the motion-ability checks quiet
+    // so the isolation warning is observable.
+    config.option<ConfigOptionFloats>("machine_max_acceleration_extruding")->values = {100000., 100000.};
+    config.option<ConfigOptionFloats>("machine_max_acceleration_travel")->values = {100000., 100000.};
+    config.option<ConfigOptionFloats>("machine_max_jerk_x")->values = {1000., 1000.};
+    config.option<ConfigOptionFloats>("machine_max_jerk_y")->values = {1000., 1000.};
     return config;
 }
 
@@ -394,4 +402,40 @@ TEST_CASE("Sparse isolated layer prints only the active section with the current
             }
     }
     CHECK(sparse_layers >= 5);
+}
+
+TEST_CASE("Isolation with a single category warns and leaves the tower unchanged", "[PrimeTowerIsolation]")
+{
+    using Catch::Matchers::WithinAbs;
+    Model model;
+    add_gap_objects(model);
+    DynamicPrintConfig on = two_material_config(true);
+    on.option<ConfigOptionInts>("filament_adhesiveness_category")->values = {100, 100};
+    DynamicPrintConfig off = on;
+    off.set("prime_tower_isolate_materials", false);
+
+    Print print_on, print_off;
+    print_on.set_status_silent();
+    print_off.set_status_silent();
+    print_on.apply(model, on);
+    StringObjectException warning;
+    const StringObjectException err = print_on.validate(&warning);
+    CAPTURE(err.string, warning.string);
+    CHECK(err.string.empty());
+    CHECK(warning.string.find("no effect") != std::string::npos);
+    print_on.process();
+    print_off.apply(model, off);
+    print_off.process();
+
+    const WipeTowerData& a = print_on.wipe_tower_data();
+    const WipeTowerData& b = print_off.wipe_tower_data();
+    CHECK_THAT(double(a.depth), WithinAbs(double(b.depth), 1e-4));
+    REQUIRE(a.tool_changes.size() == b.tool_changes.size());
+    for (size_t i = 0; i < a.tool_changes.size(); ++i) {
+        REQUIRE(a.tool_changes[i].size() == b.tool_changes[i].size());
+        for (size_t j = 0; j < a.tool_changes[i].size(); ++j) {
+            CAPTURE(i, j);
+            CHECK(a.tool_changes[i][j].gcode == b.tool_changes[i][j].gcode);
+        }
+    }
 }

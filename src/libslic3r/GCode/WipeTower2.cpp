@@ -2832,7 +2832,7 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer_new(bool extrude_perimeter,
     }*/
     m_current_layer_finished = true;
 
-    if (m_isolate_materials) {
+    if (isolation_active()) {
         // Material isolation: there is no shared outer wall and no shared fill. Each section's
         // wall and fill are printed by finish_block() with that section's own material. This
         // function then only contributes the brim loops around the whole footprint.
@@ -3607,7 +3607,7 @@ void WipeTower2::generate_new(std::vector<std::vector<WipeTower::ToolChangeResul
             if (need_insert_solid_infill) {
                 wall_idx = m_current_tool;
             }
-            else if (m_isolate_materials) {
+            else if (isolation_active()) {
                 // Sparse layer with material isolation: no toolchange, so only the current tool's
                 // category can be active here. Print every active section (its wall and fill)
                 // with the current tool, then the brim loops if this is a brim layer.
@@ -3667,7 +3667,7 @@ void WipeTower2::generate_new(std::vector<std::vector<WipeTower::ToolChangeResul
 
             for (WipeTowerBlock& block : m_wipe_tower_blocks) {
                 block.finish_depth[m_cur_layer_id] = block.start_depth + block.depth;
-                if (m_isolate_materials) {
+                if (isolation_active()) {
                     // A section's wall is drawn by finish_block, so an active section is always finished.
                     if (block.layer_depths[m_cur_layer_id] <= WT_EPSILON)
                         continue;
@@ -3687,7 +3687,7 @@ void WipeTower2::generate_new(std::vector<std::vector<WipeTower::ToolChangeResul
                     finish_layer_filament = block.last_nozzle_change_id;
                 }
 
-                if (m_isolate_materials) {
+                if (isolation_active()) {
                     // Only this section's own category may print it. Prefer the filament that purged
                     // into it; otherwise any filament of its category present on this layer, which
                     // ToolOrdering guarantees exists while the section is active.
@@ -4250,7 +4250,7 @@ void WipeTower2::generate_wipe_tower_blocks(bool add_solid_flag)
         }
     }
 
-    if (m_isolate_materials) {
+    if (isolation_active()) {
         // No taper: a section keeps its maximum depth (at least m_min_section_depth) on every
         // layer where its category is active, and ends where the category is no longer active.
         // Each layer's depth also carries the spacing between the sections active on it.
@@ -4282,7 +4282,7 @@ void WipeTower2::generate_wipe_tower_blocks(bool add_solid_flag)
     }
 
     // Isolation never stacks dissimilar materials, so the Contact/Solid interface layers are not needed.
-    if (add_solid_flag && !m_isolate_materials) {
+    if (add_solid_flag && !isolation_active()) {
         int solid_infill_layer_low = 4;
         std::vector<std::unordered_set<int>> layers_used_tools;
 
@@ -4624,7 +4624,7 @@ WipeTower::ToolChangeResult WipeTower2::finish_block(const WipeTowerBlock& block
     WipeTower::box_coordinates wt_box(Vec2f(0.f, 0.f), m_wipe_tower_width, m_layer_info->depth + m_perimeter_width);
     wt_box = align_perimeter(wt_box);
 
-    if (m_isolate_materials) {
+    if (isolation_active()) {
         // Material isolation: this section's own wall replaces the shared outer wall. It sits at
         // the same X as the old outer wall, one line below and at the end of this section's
         // interior (the same convention the shared wall used for the whole tower).
@@ -4668,7 +4668,7 @@ WipeTower::ToolChangeResult WipeTower2::finish_block(const WipeTowerBlock& block
 WipeTower::ToolChangeResult WipeTower2::finish_block_solid(const WipeTowerBlock& block,
     int filament_id, bool extrude_fill, WipeTowerLayerType layer_type)
 {
-    assert(!m_isolate_materials); // isolation assigns no Contact/Solid layer types
+    assert(!isolation_active()); // isolation assigns no Contact/Solid layer types
     float layer_height = m_layer_height;
     float e_flow = m_extrusion_flow;
     if (m_cur_layer_id > 1 && block.layers_type[m_cur_layer_id - 1] == WipeTowerLayerType::Normal && m_extrusion_flow < extrusion_flow(0.2)) {
