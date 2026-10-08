@@ -62,7 +62,7 @@ Tooltip for `prime_tower_isolate_materials`: "Give each filament
 adhesiveness category its own walled section of the prime tower, printed
 only by filaments of that category, so dissimilar materials never stack.
 Adds a toolchange on layers that would otherwise not use a material. Forces
-rectangle walls and internal ribs."
+rectangle walls; sections keep full depth without tapering."
 
 Tooltip for `prime_tower_min_section_depth`: "Minimum depth of each
 material section when materials are isolated. Prevents lightly used
@@ -72,10 +72,13 @@ Behaviour when `prime_tower_isolate_materials` is on:
 
 - Materials are grouped by the existing per-filament
   `filament_adhesiveness_category`. No new per-filament setting.
-- `wipe_tower_wall_type` is treated as rectangle and
-  `prime_tower_enable_framework` (internal ribs) as on, regardless of their
-  values. `ConfigManipulation` greys out both controls, and the U1 tower
-  interface controls, while isolation is on.
+- `wipe_tower_wall_type` is treated as rectangle regardless of its value.
+  `prime_tower_enable_framework` (internal ribs) is ignored: isolation uses
+  its own no-taper rule (section 3) instead, because the internal-ribs code
+  copies first-layer depths to every layer and would extend a section to the
+  top of the print after its material stops being used. `ConfigManipulation`
+  greys out both controls, and the U1 tower interface controls, while
+  isolation is on.
 - `wipe_tower_filament`, if set, is still inserted into every tower layer
   but no longer prints a wall. Its tooltip gains a sentence saying so.
 - The option is hidden for Bambu printers, like `wipe_tower_no_sparse_layers`.
@@ -116,9 +119,10 @@ more toolchange to return. Accepted for the U1.
   per-layer depth to at least `prime_tower_min_section_depth` on every layer
   where the block is active. Tower depth is the sum of section depths plus
   gaps.
-- **Gap.** Adjacent sections are separated by half a line width: enough to
-  stop the two walls fusing across the seam, small enough that the columns
-  touch and brace each other laterally.
+- **Gap.** Adjacent sections are separated by one line width of clear air
+  (wall centres two line widths apart), so the two walls never fuse. Lateral
+  bracing between columns is not a design requirement; if real prints show
+  columns need it, the gap can become a setting later.
 - **Per-section walls.** `finish_block` already draws a rectangle around
   the block's remaining area. In isolation mode that rectangle is the
   section's outer wall, inset by the gap, and the shared outer perimeter in
@@ -129,9 +133,12 @@ more toolchange to return. Accepted for the U1.
   there was a toolchange, otherwise the inserted representative. The
   fallbacks to the wall filament / currently loaded filament are removed in
   this mode. Section 2 guarantees presence; an assert guards it.
+- **No taper.** A section keeps its maximum depth (over all layers where
+  its category is active) on every active layer, and ends on the first
+  layer where its category is no longer active. This replaces the
+  internal-ribs behaviour in isolation mode.
 - **Contact and solid layers.** The dissimilar-interface logic (Contact,
-  Contact_UP, Solid) is skipped. Internal ribs are forced on so each
-  section keeps its full depth all the way up.
+  Contact_UP, Solid) is skipped, since nothing dissimilar stacks.
 - **First layer and brim.** Unchanged: usual first-layer rules, one brim
   around the whole footprint.
 - **Final purge, local-Z and nozzle-change paths** keep working: they
@@ -156,6 +163,11 @@ Interactions:
 - Purge into objects/infill: unchanged; it just reduces what lands in the
   section.
 - Wall type / internal ribs: overridden as in section 1.
+- Pre-slice tower estimate: the 3D view's estimated tower box
+  (`PartPlate::estimate_wipe_tower_size`) does not know about the minimum
+  section depth or inserted toolchanges, so it is shallower than the real
+  tower until slicing finishes and the real mesh replaces it. Accepted as
+  cosmetic for phase 1.
 
 Edge cases:
 
