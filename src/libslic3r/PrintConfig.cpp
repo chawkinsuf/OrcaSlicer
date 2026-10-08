@@ -6324,7 +6324,9 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Wipe tower");
     def->category = L("Extruders");
     def->tooltip = L("The extruder to use when printing perimeter of the wipe tower. "
-                     "Set to 0 to use the one that is available (non-soluble would be preferred).");
+                     "Set to 0 to use the one that is available (non-soluble would be preferred). "
+                     "When materials are isolated in the prime tower, this filament is still added to every layer "
+                     "but each section prints its own wall.");
     def->min = 0;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(0));
@@ -6342,6 +6344,24 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Enable internal ribs to increase the stability of the prime tower.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("prime_tower_isolate_materials", coBool);
+    def->label = L("Isolate materials in prime tower");
+    def->tooltip = L("Give each filament adhesiveness category its own walled section of the prime tower, "
+                     "printed only by filaments of that category, so dissimilar materials never stack. "
+                     "Adds a toolchange on layers that would otherwise not use a material. "
+                     "Forces rectangle walls; sections keep full depth without tapering.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("prime_tower_min_section_depth", coFloat);
+    def->label = L("Minimum section depth");
+    def->tooltip = L("Minimum depth of each material section when materials are isolated. "
+                     "Prevents lightly used materials from producing a thin, unstable column.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(10.));
 
     def = this->add("wiping_volumes_extruders", coFloats);
     def->label = L("Purging volumes - load/unload volumes");

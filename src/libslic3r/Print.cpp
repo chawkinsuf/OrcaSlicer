@@ -819,6 +819,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "wipe_tower_fillet_wall"
             || opt_key == "wipe_tower_wall_gap"
             || opt_key == "prime_tower_enable_framework"
+            || opt_key == "prime_tower_isolate_materials"
+            || opt_key == "prime_tower_min_section_depth"
             || opt_key == "wipe_tower_filament"
             || opt_key == "wiping_volumes_extruders"
             || opt_key == "dithering_local_z_infill"

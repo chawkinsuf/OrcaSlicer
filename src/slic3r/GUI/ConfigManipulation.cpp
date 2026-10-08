@@ -876,9 +876,11 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     std::string printer_model = wxGetApp().preset_bundle->printers.get_edited_preset().config.opt_string("printer_model");
     bool is_tower_interface_supported = printer_model.find("Snapmaker U1") != std::string::npos;
-    toggle_line("enable_tower_interface_features", have_prime_tower && is_tower_interface_supported);
+    bool isolate_materials = config->opt_bool("prime_tower_isolate_materials");
+    // Isolation acts on contact layers that no longer occur, so the interface features are inert with it on.
+    toggle_line("enable_tower_interface_features", have_prime_tower && is_tower_interface_supported && !isolate_materials);
     toggle_line("enable_tower_interface_cooldown_during_tower",
-                have_prime_tower && is_tower_interface_supported && config->opt_bool("enable_tower_interface_features"));
+                have_prime_tower && is_tower_interface_supported && !isolate_materials && config->opt_bool("enable_tower_interface_features"));
 
     bool purge_in_primetower = preset_bundle->printers.get_edited_preset().config.opt_bool("purge_in_prime_tower");
 
@@ -889,6 +891,13 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
                     "wipe_tower_bridging", "wipe_tower_extra_flow",
                     "wipe_tower_no_sparse_layers"})
       toggle_line(el, have_prime_tower && !is_BBL_Printer);
+
+    toggle_line("prime_tower_isolate_materials", have_prime_tower && !is_BBL_Printer);
+    toggle_line("prime_tower_min_section_depth", have_prime_tower && !is_BBL_Printer && isolate_materials);
+    // Isolation forces rectangle walls and its own no-taper rule.
+    for (auto el : {"wipe_tower_wall_type", "prime_tower_enable_framework",
+                    "wipe_tower_extra_rib_length", "wipe_tower_rib_width", "wipe_tower_cone_angle"})
+        toggle_field(el, have_prime_tower && !is_BBL_Printer && !isolate_materials);
 
     const bool local_z_dithering_enabled =
         config->has("dithering_local_z_mode") && config->option("dithering_local_z_mode") != nullptr &&
@@ -903,7 +912,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_line("wipe_tower_rib_width", have_prime_tower && !is_BBL_Printer && wipe_tower_wall_type == WipeTowerWallType::wtwRib);
     toggle_line("wipe_tower_fillet_wall", have_prime_tower && !is_BBL_Printer && wipe_tower_wall_type == WipeTowerWallType::wtwRib);
     
-    toggle_field("prime_tower_width", have_prime_tower && wipe_tower_wall_type != WipeTowerWallType::wtwRib);
+    toggle_field("prime_tower_width", have_prime_tower && (wipe_tower_wall_type != WipeTowerWallType::wtwRib || isolate_materials));
 
     toggle_line("wipe_tower_wall_gap", have_prime_tower);
     toggle_line("prime_tower_enable_framework", have_prime_tower);

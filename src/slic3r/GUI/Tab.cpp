@@ -2991,6 +2991,8 @@ void TabPrint::build()
         optgroup->append_single_option_line("wipe_tower_no_sparse_layers", "multimaterial_settings_prime_tower#no-sparse-layers");
         optgroup->append_single_option_line("wipe_tower_wall_gap", "multimaterial_settings_prime_tower#wall-gap");
         optgroup->append_single_option_line("prime_tower_enable_framework", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_isolate_materials", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_min_section_depth", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("enable_tower_interface_features", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("enable_tower_interface_cooldown_during_tower", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("single_extruder_multi_material_priming", "multimaterial_settings_prime_tower");
