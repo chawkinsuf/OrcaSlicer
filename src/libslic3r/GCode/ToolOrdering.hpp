@@ -217,7 +217,9 @@ private:
     // BBS
     void                reorder_extruders(std::vector<unsigned int> tool_order_layer0);
     void 				fill_wipe_tower_partitions(const PrintConfig &config, coordf_t object_bottom_z, coordf_t max_layer_height);
-    bool                insert_wipe_tower_extruder();   
+    bool                insert_wipe_tower_extruder();
+    // Adhesiveness category of a filament (0 when the category list is shorter than the filament index).
+    int                 filament_category(unsigned int extruder) const;
     void                mark_skirt_layers(const PrintConfig &config, coordf_t max_layer_height);
     void 				collect_extruder_statistics(bool prime_multi_material);
     void                reorder_extruders_for_minimum_flush_volume();
