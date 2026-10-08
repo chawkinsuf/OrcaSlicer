@@ -17,9 +17,11 @@
 #include <boost/filesystem.hpp>
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include <vector>
+#include <tuple>
 
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
+using Catch::Matchers::WithinRel;
 
 namespace {
 
@@ -760,4 +762,95 @@ TEST_CASE("Every layer with a toolchange has tower extrusion to purge into", "[P
         CHECK(std::any_of(extruding_z.begin(), extruding_z.end(), [&](double z) { return std::abs(z - lt.print_z) < 1e-3; }));
     }
     CHECK(multi_extruder_layers > 0);
+}
+
+TEST_CASE("Two spools of one category purge exactly as they do without isolation", "[PrimeTowerIsolation]")
+{
+    // Three filaments: 0 = PLA-A (100), 1 = PLA-B (100), 2 = PETG (300), one solid cube each so
+    // every layer changes between all three and isolation has nothing to insert. Each toolchange,
+    // in particular PLA-A <-> PLA-B, must purge the same amount as with isolation off (the stock
+    // tower): sharing a section changes where a purge lands, not its size. The purge is the
+    // filament extruded between the LOAD and END markers of the toolchange; what the isolated
+    // tower appends after END (the section's own wall and fill) is expected to differ.
+    DynamicPrintConfig off = two_material_config(false);
+    off.set_num_extruders(3);
+    off.set_num_filaments(3);
+    off.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75, 1.75};
+    off.option<ConfigOptionStrings>("filament_colour")->values = {"#FF0000", "#00FF00", "#0000FF"};
+    off.option<ConfigOptionInts>("filament_adhesiveness_category")->values = {100, 100, 300};
+    DynamicPrintConfig on = off;
+    on.set("prime_tower_isolate_materials", true);
+
+    Model model;
+    for (int extruder = 1; extruder <= 3; ++extruder) {
+        ModelObject* obj = model.add_object();
+        obj->add_volume(make_cube(10., 10., 4.));
+        obj->add_instance();
+        obj->config.set("extruder", extruder);
+        obj->instances.front()->set_offset(Vec3d(40. + 30. * extruder, 50., 0.));
+    }
+
+    Print print_on, print_off;
+    print_on.set_status_silent();
+    print_off.set_status_silent();
+    print_on.apply(model, on);
+    print_on.process();
+    print_off.apply(model, off);
+    print_off.process();
+
+    // Sum of the E words (relative extrusion) in the toolchange's G-code between two markers.
+    auto extruded_between = [](const std::string& gcode, const char* from, const char* to) {
+        const size_t a = gcode.find(from);
+        const size_t b = gcode.find(to, a == std::string::npos ? 0 : a);
+        REQUIRE(a != std::string::npos);
+        REQUIRE(b != std::string::npos);
+        double e = 0.;
+        std::istringstream in(gcode.substr(a, b - a));
+        for (std::string line; std::getline(in, line);) {
+            const size_t pos = line.find(" E");
+            if (pos != std::string::npos && line.rfind("G1", 0) == 0) {
+                const double v = std::atof(line.c_str() + pos + 2);
+                if (v > 0.)
+                    e += v;
+            }
+        }
+        return e;
+    };
+    // (old tool, new tool, purged E) per layer, sorted so the order of the sections does not matter.
+    using Purge = std::tuple<int, int, double>;
+    auto purges_per_layer = [&](const WipeTowerData& data) {
+        std::vector<std::vector<Purge>> out;
+        for (const auto& layer : data.tool_changes) {
+            std::vector<Purge> purges;
+            for (const WipeTower::ToolChangeResult& tcr : layer)
+                if (tcr.is_tool_change)
+                    purges.emplace_back(tcr.initial_tool, tcr.new_tool,
+                                        extruded_between(tcr.gcode, "; CP TOOLCHANGE LOAD", "; CP TOOLCHANGE END"));
+            std::sort(purges.begin(), purges.end());
+            out.push_back(std::move(purges));
+        }
+        return out;
+    };
+    const auto a = purges_per_layer(print_on.wipe_tower_data());
+    const auto b = purges_per_layer(print_off.wipe_tower_data());
+    REQUIRE(a.size() == b.size());
+    size_t pla_to_pla = 0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        CAPTURE(i);
+        REQUIRE(a[i].size() == b[i].size());
+        REQUIRE(!a[i].empty());
+        for (size_t j = 0; j < a[i].size(); ++j) {
+            const auto& [old_on, new_on, e_on] = a[i][j];
+            const auto& [old_off, new_off, e_off] = b[i][j];
+            CAPTURE(j, old_on, new_on, old_off, new_off);
+            CHECK(old_on == old_off);
+            CHECK(new_on == new_off);
+            CHECK_THAT(e_on, WithinRel(e_off, 1e-6));
+            CHECK(e_on > 0.);
+            if (old_on < 2 && new_on < 2)
+                ++pla_to_pla;
+        }
+    }
+    CHECK(pla_to_pla > 0);
+    CHECK(print_on.wipe_tower_data().sections.size() == 2);
 }
