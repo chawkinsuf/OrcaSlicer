@@ -261,3 +261,137 @@ TEST_CASE("Isolated sections are at least the minimum depth and separated by a g
     // Total depth covers both sections.
     CHECK(data.depth >= (data.sections[1].y_end - data.sections[0].y_start) - 0.01f);
 }
+
+namespace {
+static int category_of(const Print& print, unsigned int tool)
+{
+    const auto& v = print.config().filament_adhesiveness_category.values;
+    return tool < v.size() ? v[tool] : 0;
+}
+
+static const WipeTowerData::Section& section_for(const WipeTowerData& data, int category)
+{
+    for (const auto& s : data.sections)
+        if (s.category == category)
+            return s;
+    FAIL("no section for category " << category);
+    return data.sections.front();
+}
+} // namespace
+
+TEST_CASE("Isolated sections are only extruded by their own category", "[PrimeTowerIsolation]")
+{
+    Model model;
+    add_gap_objects(model);
+    Print print;
+    print.set_status_silent();
+    print.apply(model, two_material_config(true));
+    print.process();
+
+    const WipeTowerData& data = print.wipe_tower_data();
+    REQUIRE(data.sections.size() == 2);
+    const float wall_tol = 0.5f;  // a section's own wall line sits one line width outside its interior
+    const float brim_tol = 0.3f;  // brim loops start one line spacing beyond the footprint
+    float footprint_min = data.sections.front().y_start, footprint_max = data.sections.front().y_end;
+    for (const auto& s : data.sections) {
+        footprint_min = std::min(footprint_min, s.y_start);
+        footprint_max = std::max(footprint_max, s.y_end);
+    }
+
+    size_t inside_own = 0, brim = 0;
+    for (const auto& layer : data.tool_changes) {
+        for (const WipeTower::ToolChangeResult& tcr : layer) {
+            for (const WipeTower::Extrusion& e : tcr.extrusions) {
+                if (e.width <= 0.f)
+                    continue; // travel
+                const int category = category_of(print, e.tool);
+                const auto& own = section_for(data, category);
+                CAPTURE(tcr.print_z, e.tool, e.pos.y(), own.y_start, own.y_end, footprint_min, footprint_max, data.depth);
+                // Never inside another category's section interior.
+                for (const auto& other : data.sections) {
+                    if (other.category == category)
+                        continue;
+                    CAPTURE(other.category, other.y_start, other.y_end);
+                    const bool inside_other = e.pos.y() > other.y_start + 0.01f && e.pos.y() < other.y_end - 0.01f;
+                    CHECK_FALSE(inside_other);
+                }
+                // Either in its own section (plus wall) or outside the whole footprint (brim loops).
+                const bool in_own = e.pos.y() >= own.y_start - wall_tol && e.pos.y() <= own.y_end + wall_tol;
+                const bool outside_footprint = e.pos.y() < footprint_min - brim_tol || e.pos.y() > footprint_max + brim_tol;
+                CHECK((in_own || outside_footprint));
+                if (in_own) ++inside_own;
+                if (outside_footprint) ++brim;
+            }
+        }
+    }
+    CHECK(inside_own > 100);
+    CHECK(brim > 0);
+}
+
+TEST_CASE("Sparse isolated layer prints only the active section with the current tool", "[PrimeTowerIsolation]")
+{
+    // Three filaments: 0 = PLA-A (100), 1 = PLA-B (100), 2 = PETG (300).
+    // Solid 4 mm PLA-A cube; a second object with a PETG bottom slab (0..1 mm) and a PLA-B
+    // floating slab (2.5..3.5 mm). Layer z = 1.2 still changes back from PETG to PLA-A; on
+    // layers z = 1.4..2.4 only PLA-A prints and the only
+    // category still active above is 100, which PLA-A already covers: no toolchange is
+    // inserted, so these are sparse tower layers. They must contain extrusions from tool 0
+    // only, inside the PLA section, and nothing in the (ended) PETG section.
+    DynamicPrintConfig config = two_material_config(true);
+    config.set_num_extruders(3);
+    config.set_num_filaments(3);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_colour")->values = {"#FF0000", "#00FF00", "#0000FF"};
+    config.option<ConfigOptionInts>("filament_adhesiveness_category")->values = {100, 100, 300};
+
+    Model model;
+    ModelObject* pla_a = model.add_object();
+    pla_a->add_volume(make_cube(10., 10., 4.));
+    pla_a->add_instance();
+    pla_a->config.set("extruder", 1);
+    pla_a->instances.front()->set_offset(Vec3d(50., 50., 0.));
+
+    ModelObject* mixed = model.add_object();
+    ModelVolume* bottom = mixed->add_volume(make_cube(10., 10., 1.));
+    bottom->config.set("extruder", 3);
+    ModelVolume* top = mixed->add_volume(make_cube(10., 10., 1.));
+    top->set_offset(Vec3d(0., 0., 3.));
+    top->config.set("extruder", 2);
+    mixed->add_instance();
+    mixed->config.set("extruder", 3);
+    mixed->instances.front()->set_offset(Vec3d(80., 50., 0.));
+
+    Print print;
+    print.set_status_silent();
+    print.apply(model, config);
+    print.process();
+    const WipeTowerData& data = print.wipe_tower_data();
+    REQUIRE(data.sections.size() == 2);
+    const WipeTowerData::Section& pla  = section_for(data, 100);
+    const WipeTowerData::Section& petg = section_for(data, 300);
+
+    size_t sparse_layers = 0;
+    for (const auto& layer : data.tool_changes) {
+        if (layer.empty() || layer.front().print_z < 1.3f || layer.front().print_z > 2.5f)
+            continue;
+        bool any_toolchange = false;
+        for (const auto& tcr : layer)
+            any_toolchange |= tcr.is_tool_change;
+        CAPTURE(layer.front().print_z);
+        CHECK_FALSE(any_toolchange);
+        if (any_toolchange)
+            continue;
+        ++sparse_layers;
+        for (const auto& tcr : layer)
+            for (const WipeTower::Extrusion& e : tcr.extrusions) {
+                if (e.width <= 0.f)
+                    continue;
+                CAPTURE(tcr.print_z, e.tool, e.pos.y(), pla.y_start, pla.y_end);
+                CHECK(e.tool == 0u);
+                CHECK(e.pos.y() >= pla.y_start - 1.f);
+                CHECK(e.pos.y() <= pla.y_end + 1.f);
+                CHECK_FALSE((e.pos.y() > petg.y_start + 0.01f && e.pos.y() < petg.y_end - 0.01f));
+            }
+    }
+    CHECK(sparse_layers >= 5);
+}

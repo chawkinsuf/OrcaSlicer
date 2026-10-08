@@ -2832,6 +2832,17 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer_new(bool extrude_perimeter,
     }*/
     m_current_layer_finished = true;
 
+    if (m_isolate_materials) {
+        // Material isolation: there is no shared outer wall and no shared fill. Each section's
+        // wall and fill are printed by finish_block() with that section's own material. This
+        // function then only contributes the brim loops around the whole footprint.
+        extrude_perimeter = false;
+        extrude_fill      = false;
+        extrude_fill_wall = false;
+        if (is_first_layer())
+            m_rib_offset = Vec2f(0.f, 0.f); // rectangle walls start at the tower origin
+    }
+
     WipeTowerWriter2 writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_enable_arc_fitting, m_printer_model);
     writer.set_extrusion_flow(m_extrusion_flow)
         .set_z(m_z_pos)
@@ -3596,6 +3607,26 @@ void WipeTower2::generate_new(std::vector<std::vector<WipeTower::ToolChangeResul
             if (need_insert_solid_infill) {
                 wall_idx = m_current_tool;
             }
+            else if (m_isolate_materials) {
+                // Sparse layer with material isolation: no toolchange, so only the current tool's
+                // category can be active here. Print every active section (its wall and fill)
+                // with the current tool, then the brim loops if this is a brim layer.
+                bool first = true;
+                for (WipeTowerBlock& block : m_wipe_tower_blocks) {
+                    if (block.layer_depths[m_cur_layer_id] <= WT_EPSILON) {
+                        block.finish_depth[m_cur_layer_id] = block.start_depth;
+                        continue;
+                    }
+                    assert(block.filament_adhesiveness_category == get_filament_category(m_current_tool));
+                    WipeTower::ToolChangeResult block_tcr = finish_block(block, m_current_tool, layer.extruder_fill);
+                    block.finish_depth[m_cur_layer_id] = block.cur_depth;
+                    finish_layer_tcr = first ? block_tcr : merge_tcr(finish_layer_tcr, block_tcr);
+                    first = false;
+                }
+                WipeTower::ToolChangeResult brim_tcr = finish_layer_new(false, false, false);
+                if (is_valid_gcode(brim_tcr.gcode))
+                    finish_layer_tcr = first ? brim_tcr : merge_tcr(finish_layer_tcr, brim_tcr);
+            }
             else {
                 finish_layer_tcr = finish_layer_new(true, layer.extruder_fill);
                 std::for_each(m_wipe_tower_blocks.begin(), m_wipe_tower_blocks.end(), [this](WipeTowerBlock& block) {
@@ -3636,7 +3667,12 @@ void WipeTower2::generate_new(std::vector<std::vector<WipeTower::ToolChangeResul
 
             for (WipeTowerBlock& block : m_wipe_tower_blocks) {
                 block.finish_depth[m_cur_layer_id] = block.start_depth + block.depth;
-                if (block.cur_depth + EPSILON >= block.start_depth + block.layer_depths[m_cur_layer_id] - m_perimeter_width) {
+                if (m_isolate_materials) {
+                    // A section's wall is drawn by finish_block, so an active section is always finished.
+                    if (block.layer_depths[m_cur_layer_id] <= WT_EPSILON)
+                        continue;
+                }
+                else if (block.cur_depth + EPSILON >= block.start_depth + block.layer_depths[m_cur_layer_id] - m_perimeter_width) {
                     continue;
                 }
                 int id = std::find_if(m_wipe_tower_blocks.begin(), m_wipe_tower_blocks.end(), [&](const WipeTowerBlock& b) { return &b == &block; }) - m_wipe_tower_blocks.begin();
@@ -3651,14 +3687,32 @@ void WipeTower2::generate_new(std::vector<std::vector<WipeTower::ToolChangeResul
                     finish_layer_filament = block.last_nozzle_change_id;
                 }
 
-                if (!layer.tool_changes.empty()) {
-                    WipeTowerBlock* last_layer_finish_block = get_block_by_category(get_filament_category(layer.tool_changes.front().old_tool), false);
-                    if (last_layer_finish_block && last_layer_finish_block->block_id == block.block_id && finish_layer_filament == -1)
-                        finish_layer_filament = layer.tool_changes.front().old_tool;
+                if (m_isolate_materials) {
+                    // Only this section's own category may print it. Prefer the filament that purged
+                    // into it; otherwise any filament of its category present on this layer, which
+                    // ToolOrdering guarantees exists while the section is active.
+                    if (finish_layer_filament != -1 && get_filament_category(finish_layer_filament) != block.filament_adhesiveness_category)
+                        finish_layer_filament = -1;
+                    if (finish_layer_filament == -1) {
+                        for (const auto& tc : layer.tool_changes) {
+                            if (get_filament_category(int(tc.new_tool)) == block.filament_adhesiveness_category) { finish_layer_filament = int(tc.new_tool); break; }
+                            if (get_filament_category(int(tc.old_tool)) == block.filament_adhesiveness_category) { finish_layer_filament = int(tc.old_tool); break; }
+                        }
+                    }
+                    assert(finish_layer_filament != -1 && "isolation: no filament of the section's category on this layer");
+                    if (finish_layer_filament == -1)
+                        finish_layer_filament = effective_wall_idx; // keep the output valid in release builds
                 }
+                else {
+                    if (!layer.tool_changes.empty()) {
+                        WipeTowerBlock* last_layer_finish_block = get_block_by_category(get_filament_category(layer.tool_changes.front().old_tool), false);
+                        if (last_layer_finish_block && last_layer_finish_block->block_id == block.block_id && finish_layer_filament == -1)
+                            finish_layer_filament = layer.tool_changes.front().old_tool;
+                    }
 
-                if (finish_layer_filament == -1) {
-                    finish_layer_filament = effective_wall_idx;
+                    if (finish_layer_filament == -1) {
+                        finish_layer_filament = effective_wall_idx;
+                    }
                 }
 
                 WipeTower::ToolChangeResult finish_block_tcr;
@@ -4570,11 +4624,30 @@ WipeTower::ToolChangeResult WipeTower2::finish_block(const WipeTowerBlock& block
     WipeTower::box_coordinates wt_box(Vec2f(0.f, 0.f), m_wipe_tower_width, m_layer_info->depth + m_perimeter_width);
     wt_box = align_perimeter(wt_box);
 
+    if (m_isolate_materials) {
+        // Material isolation: this section's own wall replaces the shared outer wall. It sits at
+        // the same X as the old outer wall, one line below and at the end of this section's
+        // interior (the same convention the shared wall used for the whole tower).
+        WipeTower::box_coordinates wall_box(
+            Vec2f(0.f, block.start_depth - m_perimeter_width),
+            m_wipe_tower_width,
+            block.layer_depths[m_cur_layer_id] + m_perimeter_width);
+        wall_box = align_perimeter(wall_box);
+        writer.rectangle(wall_box, feedrate);
+        Polygon wall_polygon({ Point::new_scale(wall_box.ld.x(), wall_box.ld.y()), Point::new_scale(wall_box.rd.x(), wall_box.rd.y()),
+                               Point::new_scale(wall_box.ru.x(), wall_box.ru.y()), Point::new_scale(wall_box.lu.x(), wall_box.lu.y()) });
+        Polyline wall_line = to_polyline(wall_polygon);
+        wall_line.translate(0, scaled(m_y_shift));
+        m_outer_wall[m_z_pos].push_back(wall_line);
+        wt_box = wall_box;
+        finish_rect_wipe_path.clear();
+    }
+
     // Now prepare future wipe. box contains rectangle that was extruded last (ccw).
     Vec2f target = (writer.pos() == wt_box.ld ? wt_box.rd : (writer.pos() == wt_box.rd ? wt_box.ru : (writer.pos() == wt_box.ru ? wt_box.lu : wt_box.ld)));
 
     // BBS: add wipe_path for this case: only with finish rectangle
-    if (finish_rect_wipe_path.size() == 2 && finish_rect_wipe_path[0] == writer.pos()) 
+    if (finish_rect_wipe_path.size() == 2 && finish_rect_wipe_path[0] == writer.pos())
         target = finish_rect_wipe_path[1];
 
     writer.add_wipe_point(writer.pos()).add_wipe_point(target);
@@ -4592,9 +4665,10 @@ WipeTower::ToolChangeResult WipeTower2::finish_block(const WipeTowerBlock& block
     return construct_block_tcr(writer, false, filament_id, true, 0.f);
 }
 
-WipeTower::ToolChangeResult WipeTower2::finish_block_solid(const WipeTowerBlock& block, 
+WipeTower::ToolChangeResult WipeTower2::finish_block_solid(const WipeTowerBlock& block,
     int filament_id, bool extrude_fill, WipeTowerLayerType layer_type)
 {
+    assert(!m_isolate_materials); // isolation assigns no Contact/Solid layer types
     float layer_height = m_layer_height;
     float e_flow = m_extrusion_flow;
     if (m_cur_layer_id > 1 && block.layers_type[m_cur_layer_id - 1] == WipeTowerLayerType::Normal && m_extrusion_flow < extrusion_flow(0.2)) {
