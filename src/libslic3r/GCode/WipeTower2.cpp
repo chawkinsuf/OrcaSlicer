@@ -2882,7 +2882,14 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer_new(bool extrude_perimeter,
         fill_boxes.emplace_back(Vec2f(m_perimeter_width, block->cur_depth), m_wipe_tower_width - 2 * m_perimeter_width, fill_depth);
     }
 
-    writer.set_initial_position((m_left_to_right ? fill_boxes.front().ru : fill_boxes.front().lu), m_wipe_tower_width, m_wipe_tower_depth, m_internal_rotation);
+    if (isolation_active()) {
+        // Brim-only pass: the fill box above is sized for a single block from the current tool's
+        // section origin, which lands past the brim whenever that section is not the first one.
+        // Start at the tower corner instead; the brim loop then begins at its nearest corner.
+        writer.set_initial_position(Vec2f(0.f, 0.f), m_wipe_tower_width, m_wipe_tower_depth, m_internal_rotation);
+    }
+    else
+        writer.set_initial_position((m_left_to_right ? fill_boxes.front().ru : fill_boxes.front().lu), m_wipe_tower_width, m_wipe_tower_depth, m_internal_rotation);
 
     bool solid_infill = (m_layer_info + 1 == m_plan.end()) ? false :
         std::any_of((m_layer_info + 1)->tool_changes.begin(), (m_layer_info + 1)->tool_changes.end(),

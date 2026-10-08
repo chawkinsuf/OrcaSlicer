@@ -12,6 +12,8 @@
 #include <limits>
 #include <cmath>
 #include <fstream>
+#include <sstream>
+#include <cstdlib>
 #include <boost/filesystem.hpp>
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include <vector>
@@ -672,4 +674,50 @@ TEST_CASE("Isolated section wall has an entry gap where a toolchange enters it",
         }
     }
     CHECK(checked >= 10);
+}
+
+TEST_CASE("Isolated tower never starts a pass outside its brim", "[PrimeTowerIsolation]")
+{
+    // The brim-only pass used to start at the current tool's section origin plus a whole-tower
+    // fill depth, which put a travel well past the brim whenever that section was not the first.
+    Model model;
+    add_gap_objects(model);
+    Print print;
+    print.set_status_silent();
+    print.apply(model, two_material_config(true));
+    print.process();
+    const WipeTowerData& data = print.wipe_tower_data();
+    REQUIRE(!data.tool_changes.empty());
+    const float margin = data.brim_width + 0.01f;
+    const BoundingBoxf& bbx = data.bbx;
+    auto inside = [&](const Vec2f& p) {
+        return p.x() >= bbx.min.x() - margin && p.x() <= bbx.max.x() + margin &&
+               p.y() >= bbx.min.y() - margin && p.y() <= bbx.max.y() + margin;
+    };
+    for (size_t layer = 0; layer < data.tool_changes.size(); ++layer) {
+        for (size_t i = 0; i < data.tool_changes[layer].size(); ++i) {
+            const WipeTower::ToolChangeResult& tcr = data.tool_changes[layer][i];
+            CAPTURE(layer, i, tcr.start_pos.x(), tcr.start_pos.y(), bbx.min.x(), bbx.min.y(), bbx.max.x(), bbx.max.y(), margin);
+            CHECK(inside(tcr.start_pos));
+            CHECK(inside(tcr.end_pos));
+            // Merged results keep only the first pass's start position; the travel to a later
+            // pass is a plain G1 inside the G-code, so check every XY move in it as well.
+            std::istringstream in(tcr.gcode);
+            std::string line;
+            int bad_moves = 0;
+            while (std::getline(in, line)) {
+                if (line.rfind("G1", 0) != 0)
+                    continue;
+                size_t xi = line.find(" X"), yi = line.find(" Y");
+                if (xi == std::string::npos || yi == std::string::npos)
+                    continue;
+                Vec2f p(std::strtof(line.c_str() + xi + 2, nullptr), std::strtof(line.c_str() + yi + 2, nullptr));
+                if (!inside(p)) {
+                    CAPTURE(line);
+                    ++bad_moves;
+                }
+            }
+            CHECK(bad_moves == 0);
+        }
+    }
 }
