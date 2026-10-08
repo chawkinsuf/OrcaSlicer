@@ -9,7 +9,6 @@
 #include <limits>
 #include <sstream>
 #include <iomanip>
-#include <set>
 #include <unordered_set>
 
 #include "ClipperUtils.hpp"
@@ -3177,26 +3176,8 @@ void WipeTower2::plan_local_z_reserve(float z_par, float layer_height_par, size_
 
 void WipeTower2::plan_tower_new()
 {
-    if (m_isolate_materials) {
-        // Isolation draws one rectangular wall per section; rib/cone outlines and the
-        // internal-ribs depth copy (which would extend a section past its last use) do not apply.
-        // With a single category there is only one section and the tower is printed as configured
-        // (see isolation_active()), so decide from the categories the toolchanges actually use.
-        std::set<int> categories;
-        for (const WipeTowerInfo& layer : m_plan) {
-            for (const auto* changes : {&layer.tool_changes, &layer.local_z_tool_changes})
-                for (const WipeTowerInfo::ToolChange& tc : *changes)
-                    if (tc.old_tool != tc.new_tool) {
-                        categories.insert(get_filament_category(tc.old_tool));
-                        categories.insert(get_filament_category(tc.new_tool));
-                    }
-        }
-        if (categories.size() > 1) {
-            m_wall_type       = (int) WipeTowerWallType::wtwRectangle;
-            m_use_rib_wall    = false;
-            m_tower_framework = false;
-        }
-    }
+    if (m_isolate_materials)
+        isolation_plan_wall_type(); // material isolation forces rectangle walls (WipeTowerIsolation.cpp)
 
     if (m_use_rib_wall) {
         // recalculate wipe_tower_with and layer's depth
@@ -3629,24 +3610,13 @@ void WipeTower2::generate_new(std::vector<std::vector<WipeTower::ToolChangeResul
                 wall_idx = m_current_tool;
             }
             else if (isolation_active()) {
-                // Sparse layer with material isolation: no toolchange, so only the current tool's
-                // category can be active here. Print every active section (its wall and fill)
-                // with the current tool, then the brim loops if this is a brim layer.
-                bool first = true;
-                for (WipeTowerBlock& block : m_wipe_tower_blocks) {
-                    if (block.layer_depths[m_cur_layer_id] <= WT_EPSILON) {
-                        block.finish_depth[m_cur_layer_id] = block.start_depth;
-                        continue;
-                    }
-                    assert(block.filament_adhesiveness_category == get_filament_category(m_current_tool));
-                    WipeTower::ToolChangeResult block_tcr = finish_block(block, m_current_tool, layer.extruder_fill);
-                    block.finish_depth[m_cur_layer_id] = block.cur_depth;
-                    finish_layer_tcr = first ? block_tcr : merge_tcr(finish_layer_tcr, block_tcr);
-                    first = false;
-                }
+                // Material isolation: each active section is printed by the current tool, then the brim loops.
+                std::vector<WipeTower::ToolChangeResult> tcrs = isolation_finish_sparse_sections(layer.extruder_fill);
                 WipeTower::ToolChangeResult brim_tcr = finish_layer_new(false, false, false);
                 if (is_valid_gcode(brim_tcr.gcode))
-                    finish_layer_tcr = first ? brim_tcr : merge_tcr(finish_layer_tcr, brim_tcr);
+                    tcrs.emplace_back(brim_tcr);
+                for (size_t i = 0; i < tcrs.size(); ++i)
+                    finish_layer_tcr = i == 0 ? tcrs[i] : merge_tcr(finish_layer_tcr, tcrs[i]);
             }
             else {
                 finish_layer_tcr = finish_layer_new(true, layer.extruder_fill);
@@ -3689,7 +3659,7 @@ void WipeTower2::generate_new(std::vector<std::vector<WipeTower::ToolChangeResul
             for (WipeTowerBlock& block : m_wipe_tower_blocks) {
                 block.finish_depth[m_cur_layer_id] = block.start_depth + block.depth;
                 if (isolation_active()) {
-                    // A section's wall is drawn by finish_block, so an active section is always finished.
+                    // Material isolation: a section's wall is drawn by finish_block, so every active section is finished.
                     if (block.layer_depths[m_cur_layer_id] <= WT_EPSILON)
                         continue;
                 }
@@ -3708,32 +3678,17 @@ void WipeTower2::generate_new(std::vector<std::vector<WipeTower::ToolChangeResul
                     finish_layer_filament = block.last_nozzle_change_id;
                 }
 
-                if (isolation_active()) {
-                    // Only this section's own category may print it. Prefer the filament that purged
-                    // into it; otherwise any filament of its category present on this layer, which
-                    // ToolOrdering guarantees exists while the section is active.
-                    if (finish_layer_filament != -1 && get_filament_category(finish_layer_filament) != block.filament_adhesiveness_category)
-                        finish_layer_filament = -1;
-                    if (finish_layer_filament == -1) {
-                        for (const auto& tc : layer.tool_changes) {
-                            if (get_filament_category(int(tc.new_tool)) == block.filament_adhesiveness_category) { finish_layer_filament = int(tc.new_tool); break; }
-                            if (get_filament_category(int(tc.old_tool)) == block.filament_adhesiveness_category) { finish_layer_filament = int(tc.old_tool); break; }
-                        }
-                    }
-                    assert(finish_layer_filament != -1 && "isolation: no filament of the section's category on this layer");
-                    if (finish_layer_filament == -1)
-                        finish_layer_filament = effective_wall_idx; // keep the output valid in release builds
-                }
-                else {
-                    if (!layer.tool_changes.empty()) {
-                        WipeTowerBlock* last_layer_finish_block = get_block_by_category(get_filament_category(layer.tool_changes.front().old_tool), false);
-                        if (last_layer_finish_block && last_layer_finish_block->block_id == block.block_id && finish_layer_filament == -1)
-                            finish_layer_filament = layer.tool_changes.front().old_tool;
-                    }
+                if (isolation_active()) // material isolation: only the section's own category may finish it
+                    finish_layer_filament = isolation_finish_filament(block, layer, finish_layer_filament, effective_wall_idx);
 
-                    if (finish_layer_filament == -1) {
-                        finish_layer_filament = effective_wall_idx;
-                    }
+                if (!layer.tool_changes.empty()) {
+                    WipeTowerBlock* last_layer_finish_block = get_block_by_category(get_filament_category(layer.tool_changes.front().old_tool), false);
+                    if (last_layer_finish_block && last_layer_finish_block->block_id == block.block_id && finish_layer_filament == -1)
+                        finish_layer_filament = layer.tool_changes.front().old_tool;
+                }
+
+                if (finish_layer_filament == -1) {
+                    finish_layer_filament = effective_wall_idx;
                 }
 
                 WipeTower::ToolChangeResult finish_block_tcr;
@@ -4279,27 +4234,10 @@ void WipeTower2::generate_wipe_tower_blocks(bool add_solid_flag)
     }
 
     if (isolation_active()) {
-        // No taper: a section keeps its maximum depth (at least m_min_section_depth) on every
-        // layer where its category is active, and ends where the category is no longer active.
-        // Each layer's depth also carries the spacing between the sections active on it.
-        // Depths are aligned to the line-width grid so that align_perimeter() leaves the section
-        // walls where they are laid out; otherwise it would push neighbouring walls into each
-        // other and close the air gap.
-        for (auto& block : m_wipe_tower_blocks)
-            block.depth = align_ceil(std::max(block.depth, m_min_section_depth), m_perimeter_width);
-        for (size_t layer_id = 0; layer_id < m_plan.size(); ++layer_id) {
-            int active = 0;
-            m_plan[layer_id].depth = 0;
-            for (auto& block : m_wipe_tower_blocks) {
-                if (block.layer_depths[layer_id] > WT_EPSILON) {
-                    block.layer_depths[layer_id] = block.depth;
-                    ++active;
-                }
-                m_plan[layer_id].depth += block.layer_depths[layer_id];
-            }
-            if (active > 1)
-                m_plan[layer_id].depth += section_spacing() * float(active - 1);
-        }
+        // Material isolation: sections keep full depth with spacing between them, and never
+        // stack dissimilar materials, so the Contact/Solid interface layers are not needed.
+        isolation_layout_blocks();
+        add_solid_flag = false;
     }
 
     if (m_tower_framework) {
@@ -4312,8 +4250,7 @@ void WipeTower2::generate_wipe_tower_blocks(bool add_solid_flag)
         }
     }
 
-    // Isolation never stacks dissimilar materials, so the Contact/Solid interface layers are not needed.
-    if (add_solid_flag && !isolation_active()) {
+    if (add_solid_flag) {
         int solid_infill_layer_low = 4;
         std::vector<std::unordered_set<int>> layers_used_tools;
 
@@ -4382,27 +4319,18 @@ void WipeTower2::update_all_layer_depth(float wipe_tower_depth)
     m_wipe_tower_depth = 0.f;
     float start_offset = m_perimeter_width;
     float start_depth = start_offset;
-    for (size_t i = 0; i < m_wipe_tower_blocks.size(); ++i) {
-        auto& block = m_wipe_tower_blocks[i];
+    for (auto& block : m_wipe_tower_blocks) {
         block.start_depth = start_depth;
         start_depth += block.depth;
         m_wipe_tower_depth += block.depth;
-        if (i + 1 < m_wipe_tower_blocks.size()) {
-            // Isolation: room for this section's top wall, the next one's bottom wall, and the air gap.
-            start_depth += section_spacing();
-            m_wipe_tower_depth += section_spacing();
-        }
+        // Material isolation: room for this section's top wall, the next one's bottom wall, and the air gap.
+        start_depth += section_spacing();
+        m_wipe_tower_depth += section_spacing();
     }
+    if (!m_wipe_tower_blocks.empty())
+        m_wipe_tower_depth -= section_spacing(); // no spacing after the last section
     if (m_wipe_tower_depth > 0)
         m_wipe_tower_depth += start_offset;
-}
-
-std::vector<WipeTower2::Section> WipeTower2::get_sections() const
-{
-    std::vector<Section> out;
-    for (const auto& block : m_wipe_tower_blocks)
-        out.push_back({block.filament_adhesiveness_category, block.start_depth, block.start_depth + block.depth});
-    return out;
 }
 
 Vec2f WipeTower2::get_next_pos(const WipeTower::box_coordinates& cleaning_box, float wipe_length, bool solid_toolchange)
@@ -4656,30 +4584,9 @@ WipeTower::ToolChangeResult WipeTower2::finish_block(const WipeTowerBlock& block
     wt_box = align_perimeter(wt_box);
 
     if (isolation_active()) {
-        // Material isolation: this section's own wall replaces the shared outer wall. It sits at
-        // the same X as the old outer wall, one line below and at the end of this section's
-        // interior (the same convention the shared wall used for the whole tower).
-        WipeTower::box_coordinates wall_box(
-            Vec2f(0.f, block.start_depth - m_perimeter_width),
-            m_wipe_tower_width,
-            block.layer_depths[m_cur_layer_id] + m_perimeter_width);
-        wall_box = align_perimeter(wall_box);
-        Polygon wall_polygon = generate_rectange_polygon(wall_box.ld, wall_box.ru);
-        // Wall gap: leave the entry gap at this layer's toolchange entry points that lie on this
-        // section's side walls, exactly as the shared outer wall did.
-        std::vector<Vec2f> skip_points;
-        if (m_use_gap_wall && m_cur_layer_id >= 0 && size_t(m_cur_layer_id) < m_wall_skip_points.size()) {
-            for (const Vec2f& pt : m_wall_skip_points[m_cur_layer_id])
-                if (pt.y() >= wall_box.ld.y() - WT_EPSILON && pt.y() <= wall_box.lu.y() + WT_EPSILON)
-                    skip_points.push_back(pt);
-        }
-        Polygon   insert_skip_polygon;
-        Polylines wall_paths = contrust_gap_for_skip_points(wall_polygon, skip_points, m_wipe_tower_width, 2.5f * m_perimeter_width, insert_skip_polygon);
+        // Material isolation: this section's own wall replaces the shared outer wall.
+        Polylines wall_paths = isolation_section_wall(block, wt_box);
         writer.generate_path(wall_paths, feedrate, m_filpar[filament_id].retract_length, m_filpar[filament_id].retract_speed * 60.f, m_used_fillet);
-        Polyline wall_line = to_polyline(insert_skip_polygon);
-        wall_line.translate(0, scaled(m_y_shift));
-        m_outer_wall[m_z_pos].push_back(wall_line);
-        wt_box = wall_box;
         finish_rect_wipe_path.clear();
     }
 
@@ -4687,7 +4594,7 @@ WipeTower::ToolChangeResult WipeTower2::finish_block(const WipeTowerBlock& block
     Vec2f target = (writer.pos() == wt_box.ld ? wt_box.rd : (writer.pos() == wt_box.rd ? wt_box.ru : (writer.pos() == wt_box.ru ? wt_box.lu : wt_box.ld)));
 
     // BBS: add wipe_path for this case: only with finish rectangle
-    if (finish_rect_wipe_path.size() == 2 && finish_rect_wipe_path[0] == writer.pos())
+    if (finish_rect_wipe_path.size() == 2 && finish_rect_wipe_path[0] == writer.pos()) 
         target = finish_rect_wipe_path[1];
 
     writer.add_wipe_point(writer.pos()).add_wipe_point(target);
@@ -4705,10 +4612,10 @@ WipeTower::ToolChangeResult WipeTower2::finish_block(const WipeTowerBlock& block
     return construct_block_tcr(writer, false, filament_id, true, 0.f);
 }
 
-WipeTower::ToolChangeResult WipeTower2::finish_block_solid(const WipeTowerBlock& block,
+WipeTower::ToolChangeResult WipeTower2::finish_block_solid(const WipeTowerBlock& block, 
     int filament_id, bool extrude_fill, WipeTowerLayerType layer_type)
 {
-    assert(!isolation_active()); // isolation assigns no Contact/Solid layer types
+    assert(!isolation_active()); // material isolation assigns no Contact/Solid layer types
     float layer_height = m_layer_height;
     float e_flow = m_extrusion_flow;
     if (m_cur_layer_id > 1 && block.layers_type[m_cur_layer_id - 1] == WipeTowerLayerType::Normal && m_extrusion_flow < extrusion_flow(0.2)) {

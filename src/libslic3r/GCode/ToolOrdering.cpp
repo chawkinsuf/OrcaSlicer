@@ -18,8 +18,6 @@
 #include <limits>
 #include <algorithm>
 #include <cmath>
-#include <map>
-#include <set>
 
 #include <boost/log/trivial.hpp>
 
@@ -397,11 +395,6 @@ ToolOrdering::ToolOrdering(const PrintObject &object, unsigned int first_extrude
     this->mark_skirt_layers(object.print()->config(), max_layer_height);
 }
 
-int ToolOrdering::filament_category(unsigned int extruder) const
-{
-    return Slic3r::filament_category(*m_print_config_ptr, extruder);
-}
-
 bool ToolOrdering::insert_wipe_tower_extruder()
 {
     if(!m_print_config_ptr->enable_prime_tower)
@@ -415,42 +408,10 @@ bool ToolOrdering::insert_wipe_tower_extruder()
                 sort_remove_duplicates(lt.extruders);
                 changed = true;
             }
-        }
+        }  
     }
-
-    // Material isolation: every adhesiveness category still active at this height (used on this
-    // layer or on any layer above) needs a filament of that category on this layer, so that its
-    // section of the tower is printed by its own material. Walk top-down and remember the filament
-    // seen nearest above for each category; that is the one inserted, so two spools of the same
-    // material never ping-pong. Only WipeTower2 (non-BBL printers) prints isolated sections, so the
-    // BBL tower gets no extra toolchanges.
-    if (m_print_config_ptr->prime_tower_isolate_materials && !m_is_BBL_printer) {
-        std::map<int, unsigned int> representative; // category -> filament seen nearest above
-        for (int i = int(m_layer_tools.size()) - 1; i >= 0; --i) {
-            LayerTools& lt = m_layer_tools[i];
-            if (lt.extruders.empty())
-                continue;
-            std::set<int> present;
-            for (unsigned int extruder : lt.extruders) {
-                int category = filament_category(extruder);
-                present.insert(category);
-                representative[category] = extruder;
-            }
-            if (!lt.has_wipe_tower)
-                continue;
-            bool layer_changed = false;
-            for (const auto& [category, extruder] : representative) {
-                if (present.count(category) == 0) {
-                    lt.extruders.emplace_back(extruder);
-                    layer_changed = true;
-                }
-            }
-            if (layer_changed) {
-                sort_remove_duplicates(lt.extruders);
-                changed = true;
-            }
-        }
-    }
+    // Material isolation: each active category needs its own filament on every tower layer (WipeTowerIsolation.cpp).
+    changed |= insert_isolation_extruders();
     return changed;
 }
 

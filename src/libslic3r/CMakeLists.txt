@@ -246,6 +246,7 @@ set(lisbslic3r_sources
     GCode/ToolOrdering.hpp
     GCode/WipeTower2.cpp
     GCode/WipeTower2.hpp
+    GCode/WipeTowerIsolation.cpp
     GCode/WipeTower.cpp
     GCode/WipeTower.hpp
     GCode/WipeTowerHelper.cpp

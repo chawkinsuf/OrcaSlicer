@@ -496,6 +496,13 @@ private:
 
     WipeTower::ToolChangeResult finish_block_solid(const WipeTowerBlock& block, int filament_id, bool extrude_fill, WipeTowerLayerType layer_type);
 
+    // Material isolation (WipeTowerIsolation.cpp).
+    void isolation_plan_wall_type();
+    void isolation_layout_blocks();
+    std::vector<WipeTower::ToolChangeResult> isolation_finish_sparse_sections(bool extrude_fill);
+    int isolation_finish_filament(const WipeTowerBlock& block, const WipeTowerInfo& layer, int candidate, int fallback);
+    Polylines isolation_section_wall(const WipeTowerBlock& block, WipeTower::box_coordinates& wall_box);
+
 };
 
 

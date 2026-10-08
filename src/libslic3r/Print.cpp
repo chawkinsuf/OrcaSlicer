@@ -3520,8 +3520,9 @@ void Print::_make_wipe_tower()
         }
 
         std::vector<int> categories;
-        for (unsigned int i = 0; i < number_of_extruders; ++i)
-            categories.push_back(filament_category(m_config, i));
+        for (size_t i = 0; i < m_config.filament_adhesiveness_category.values.size(); ++i) {
+            categories.push_back(m_config.filament_adhesiveness_category.get_at(i));
+        }
         wipe_tower.set_filament_categories(categories);
 
         // Generate the wipe tower layers.
