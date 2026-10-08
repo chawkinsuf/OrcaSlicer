@@ -189,6 +189,11 @@ public:
     };
 
     const std::map<float, Polylines>& get_outer_wall() const { return m_outer_wall; }
+
+    // Material isolation: each adhesiveness category owns a walled section of the tower.
+    struct Section { int category; float y_start; float y_end; }; // tower-local Y range of the interior
+    std::vector<Section> get_sections() const;
+    bool isolate_materials() const { return m_isolate_materials; }
     float get_layer_height() const { return m_layer_height; }
     float get_rib_length() const { return m_rib_length; }
     float get_rib_width() const { return m_rib_width; }
@@ -232,6 +237,11 @@ private:
     WipeTowerBlock* m_cur_block{ nullptr };
     std::vector<int> m_filament_categories; // adhesiveness categories
     bool m_tower_framework = false; // internal support rib
+    bool  m_isolate_materials = false; // each category gets its own walled section
+    float m_min_section_depth = 0.f;   // minimum interior depth of a section (mm)
+    // Isolation: Y distance between two neighbouring section interiors = their two wall lines
+    // plus one line of clear air. Depends on m_perimeter_width, which set_extruder() sets.
+    float section_spacing() const { return m_isolate_materials ? 3.f * m_perimeter_width : 0.f; }
     bool m_enable_tower_interface_features = false;
     bool m_enable_tower_interface_cooldown_during_tower = false;
     size_t m_cur_layer_id;

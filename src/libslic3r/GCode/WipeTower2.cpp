@@ -1473,6 +1473,8 @@ WipeTower2::WipeTower2(const PrintConfig&                     config,
     , m_extra_rib_length(config.wipe_tower_extra_rib_length)
     , m_wall_type((int) config.wipe_tower_wall_type)
     , m_use_rib_wall(config.wipe_tower_wall_type == WipeTowerWallType::wtwRib)
+    , m_isolate_materials(config.prime_tower_isolate_materials.value)
+    , m_min_section_depth(float(config.prime_tower_min_section_depth.value))
     , m_wall_filament(config.wipe_tower_filament)
     , m_enable_tower_interface_features(config.enable_tower_interface_features)
     , m_enable_tower_interface_cooldown_during_tower(config.enable_tower_interface_cooldown_during_tower)
@@ -1486,6 +1488,14 @@ WipeTower2::WipeTower2(const PrintConfig&                     config,
     m_first_layer_speed       = config.initial_layer_speed.values.front();
     if (m_first_layer_speed == 0.f) // just to make sure autospeed doesn't break it.
         m_first_layer_speed = default_speed / 2.f;
+
+    if (m_isolate_materials) {
+        // Isolation draws one rectangular wall per section; rib/cone outlines and the
+        // internal-ribs depth copy (which would extend a section past its last use) do not apply.
+        m_wall_type       = (int) WipeTowerWallType::wtwRectangle;
+        m_use_rib_wall    = false;
+        m_tower_framework = false;
+    }
 
     // Autospeed may be used...
     if (m_infill_speed == 0.f)
@@ -4186,6 +4196,27 @@ void WipeTower2::generate_wipe_tower_blocks(bool add_solid_flag)
         }
     }
 
+    if (m_isolate_materials) {
+        // No taper: a section keeps its maximum depth (at least m_min_section_depth) on every
+        // layer where its category is active, and ends where the category is no longer active.
+        // Each layer's depth also carries the spacing between the sections active on it.
+        for (auto& block : m_wipe_tower_blocks)
+            block.depth = std::max(block.depth, m_min_section_depth);
+        for (size_t layer_id = 0; layer_id < m_plan.size(); ++layer_id) {
+            int active = 0;
+            m_plan[layer_id].depth = 0;
+            for (auto& block : m_wipe_tower_blocks) {
+                if (block.layer_depths[layer_id] > WT_EPSILON) {
+                    block.layer_depths[layer_id] = block.depth;
+                    ++active;
+                }
+                m_plan[layer_id].depth += block.layer_depths[layer_id];
+            }
+            if (active > 1)
+                m_plan[layer_id].depth += section_spacing() * float(active - 1);
+        }
+    }
+
     if (m_tower_framework) {
         for (int layer_id = 1; layer_id < m_plan.size(); ++layer_id) {
             m_plan[layer_id].depth = 0;
@@ -4196,7 +4227,8 @@ void WipeTower2::generate_wipe_tower_blocks(bool add_solid_flag)
         }
     }
 
-    if (add_solid_flag) {
+    // Isolation never stacks dissimilar materials, so the Contact/Solid interface layers are not needed.
+    if (add_solid_flag && !m_isolate_materials) {
         int solid_infill_layer_low = 4;
         std::vector<std::unordered_set<int>> layers_used_tools;
 
@@ -4265,13 +4297,27 @@ void WipeTower2::update_all_layer_depth(float wipe_tower_depth)
     m_wipe_tower_depth = 0.f;
     float start_offset = m_perimeter_width;
     float start_depth = start_offset;
-    for (auto& block : m_wipe_tower_blocks) {
+    for (size_t i = 0; i < m_wipe_tower_blocks.size(); ++i) {
+        auto& block = m_wipe_tower_blocks[i];
         block.start_depth = start_depth;
         start_depth += block.depth;
         m_wipe_tower_depth += block.depth;
+        if (i + 1 < m_wipe_tower_blocks.size()) {
+            // Isolation: room for this section's top wall, the next one's bottom wall, and the air gap.
+            start_depth += section_spacing();
+            m_wipe_tower_depth += section_spacing();
+        }
     }
     if (m_wipe_tower_depth > 0)
         m_wipe_tower_depth += start_offset;
+}
+
+std::vector<WipeTower2::Section> WipeTower2::get_sections() const
+{
+    std::vector<Section> out;
+    for (const auto& block : m_wipe_tower_blocks)
+        out.push_back({block.filament_adhesiveness_category, block.start_depth, block.start_depth + block.depth});
+    return out;
 }
 
 Vec2f WipeTower2::get_next_pos(const WipeTower::box_coordinates& cleaning_box, float wipe_length, bool solid_toolchange)

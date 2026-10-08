@@ -234,3 +234,30 @@ TEST_CASE("Isolation treats filaments beyond the category list as category 0", "
         CHECK(sorted_copy(layers[i]) == std::vector<unsigned int>{0, 1});
     }
 }
+
+TEST_CASE("Isolated sections are at least the minimum depth and separated by a gap", "[PrimeTowerIsolation]")
+{
+    Model model;
+    add_gap_objects(model);
+    DynamicPrintConfig config = two_material_config(true);
+    config.set("prime_tower_min_section_depth", 12.);
+    Print print;
+    print.set_status_silent();
+    print.apply(model, config);
+    print.process();
+
+    const WipeTowerData& data = print.wipe_tower_data();
+    REQUIRE(data.sections.size() == 2);
+    for (const WipeTowerData::Section& s : data.sections) {
+        CAPTURE(s.category, s.y_start, s.y_end);
+        CHECK(s.y_end - s.y_start >= 12.f - 0.01f);
+    }
+    // Sections are ordered by y and do not overlap. Between two interiors there are two wall
+    // lines plus one line of air, so the spacing is at least three line widths; with the
+    // default config the tower line width is about 0.45 mm.
+    REQUIRE(data.sections[0].y_end < data.sections[1].y_start);
+    CHECK(data.sections[1].y_start - data.sections[0].y_end >= 3.f * 0.4f);
+    CHECK(data.sections[1].y_start - data.sections[0].y_end <= 3.f * 0.7f);
+    // Total depth covers both sections.
+    CHECK(data.depth >= (data.sections[1].y_end - data.sections[0].y_start) - 0.01f);
+}

@@ -3529,6 +3529,8 @@ void Print::_make_wipe_tower()
         m_wipe_tower_data.height            = wipe_tower.get_wipe_tower_height();
         m_wipe_tower_data.bbx               = wipe_tower.get_bbx();
         m_wipe_tower_data.rib_offset = wipe_tower.get_rib_offset();
+        for (const WipeTower2::Section& s : wipe_tower.get_sections())
+            m_wipe_tower_data.sections.push_back({s.category, s.y_start, s.y_end});
 
         // Unload the current filament over the purge tower.
         coordf_t layer_height = m_objects.front()->config().layer_height.value;
