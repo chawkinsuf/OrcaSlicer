@@ -399,8 +399,7 @@ ToolOrdering::ToolOrdering(const PrintObject &object, unsigned int first_extrude
 
 int ToolOrdering::filament_category(unsigned int extruder) const
 {
-    const auto& categories = m_print_config_ptr->filament_adhesiveness_category.values;
-    return extruder < categories.size() ? categories[extruder] : 0;
+    return Slic3r::filament_category(*m_print_config_ptr, extruder);
 }
 
 bool ToolOrdering::insert_wipe_tower_extruder()
@@ -423,8 +422,9 @@ bool ToolOrdering::insert_wipe_tower_extruder()
     // layer or on any layer above) needs a filament of that category on this layer, so that its
     // section of the tower is printed by its own material. Walk top-down and remember the filament
     // seen nearest above for each category; that is the one inserted, so two spools of the same
-    // material never ping-pong.
-    if (m_print_config_ptr->prime_tower_isolate_materials) {
+    // material never ping-pong. Only WipeTower2 (non-BBL printers) prints isolated sections, so the
+    // BBL tower gets no extra toolchanges.
+    if (m_print_config_ptr->prime_tower_isolate_materials && !m_is_BBL_printer) {
         std::map<int, unsigned int> representative; // category -> filament seen nearest above
         for (int i = int(m_layer_tools.size()) - 1; i >= 0; --i) {
             LayerTools& lt = m_layer_tools[i];

@@ -9,6 +9,7 @@
 #include <limits>
 #include <sstream>
 #include <iomanip>
+#include <set>
 #include <unordered_set>
 
 #include "ClipperUtils.hpp"
@@ -1488,14 +1489,6 @@ WipeTower2::WipeTower2(const PrintConfig&                     config,
     m_first_layer_speed       = config.initial_layer_speed.values.front();
     if (m_first_layer_speed == 0.f) // just to make sure autospeed doesn't break it.
         m_first_layer_speed = default_speed / 2.f;
-
-    if (m_isolate_materials) {
-        // Isolation draws one rectangular wall per section; rib/cone outlines and the
-        // internal-ribs depth copy (which would extend a section past its last use) do not apply.
-        m_wall_type       = (int) WipeTowerWallType::wtwRectangle;
-        m_use_rib_wall    = false;
-        m_tower_framework = false;
-    }
 
     // Autospeed may be used...
     if (m_infill_speed == 0.f)
@@ -3177,6 +3170,27 @@ void WipeTower2::plan_local_z_reserve(float z_par, float layer_height_par, size_
 
 void WipeTower2::plan_tower_new()
 {
+    if (m_isolate_materials) {
+        // Isolation draws one rectangular wall per section; rib/cone outlines and the
+        // internal-ribs depth copy (which would extend a section past its last use) do not apply.
+        // With a single category there is only one section and the tower is printed as configured
+        // (see isolation_active()), so decide from the categories the toolchanges actually use.
+        std::set<int> categories;
+        for (const WipeTowerInfo& layer : m_plan) {
+            for (const auto* changes : {&layer.tool_changes, &layer.local_z_tool_changes})
+                for (const WipeTowerInfo::ToolChange& tc : *changes)
+                    if (tc.old_tool != tc.new_tool) {
+                        categories.insert(get_filament_category(tc.old_tool));
+                        categories.insert(get_filament_category(tc.new_tool));
+                    }
+        }
+        if (categories.size() > 1) {
+            m_wall_type       = (int) WipeTowerWallType::wtwRectangle;
+            m_use_rib_wall    = false;
+            m_tower_framework = false;
+        }
+    }
+
     if (m_use_rib_wall) {
         // recalculate wipe_tower_with and layer's depth
         generate_wipe_tower_blocks(false);
@@ -3792,6 +3806,13 @@ void WipeTower2::generate_new(std::vector<std::vector<WipeTower::ToolChangeResul
 std::vector<std::pair<float, float>> WipeTower2::get_z_and_depth_pairs() const
 {
     std::vector<std::pair<float, float>> out = {{0.f, m_wipe_tower_depth}};
+    // The pairs describe a single Y interval centred on the tower. Under isolation a section nearer
+    // y=0 can end while a farther one continues, so the sections still printing are not centred;
+    // keep the full footprint up to the top of the tower instead of a misplaced smaller box.
+    if (isolation_active()) {
+        out.emplace_back(m_wipe_tower_height, 0.f);
+        return out;
+    }
     for (const WipeTowerInfo& wti : m_plan) {
         assert(wti.depth < wti.depth + WT_EPSILON);
         if (wti.depth < out.back().second - WT_EPSILON)

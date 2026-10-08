@@ -4,6 +4,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Preset.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/GCode/ToolOrdering.hpp"
 
@@ -16,6 +17,7 @@
 #include <vector>
 
 using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
 
 namespace {
 
@@ -95,7 +97,16 @@ TEST_CASE("Prime tower isolation options exist with documented defaults", "[Prim
     REQUIRE(config.has("prime_tower_isolate_materials"));
     REQUIRE(config.has("prime_tower_min_section_depth"));
     CHECK(config.opt_bool("prime_tower_isolate_materials") == false);
-    CHECK(config.opt_float("prime_tower_min_section_depth") == 10.);
+    CHECK_THAT(config.opt_float("prime_tower_min_section_depth"), WithinAbs(10., 1e-9));
+}
+
+TEST_CASE("Prime tower isolation options belong to the print preset", "[PrimeTowerIsolation]")
+{
+    const std::vector<std::string>& keys = Preset::print_options();
+    const bool has_isolate = std::find(keys.begin(), keys.end(), "prime_tower_isolate_materials") != keys.end();
+    const bool has_depth   = std::find(keys.begin(), keys.end(), "prime_tower_min_section_depth") != keys.end();
+    CHECK(has_isolate);
+    CHECK(has_depth);
 }
 
 TEST_CASE("Isolation inserts the missing category on single-material layers", "[PrimeTowerIsolation]")
@@ -129,6 +140,20 @@ TEST_CASE("Isolation inserts the missing category on single-material layers", "[
         }
         // Above the top PETG slab nothing uses PETG, so its section has ended: no insertion.
         for (size_t i = TOP_FIRST; i < layers.size(); ++i) {
+            CAPTURE(i);
+            CHECK(layers[i] == std::vector<unsigned int>{0});
+        }
+    }
+
+    SECTION("on with a BBL printer: the BBL tower cannot isolate, so nothing is inserted") {
+        Print print;
+        print.set_status_silent();
+        print.is_BBL_printer() = true;
+        print.apply(model, two_material_config(true));
+        print.process();
+        auto layers = extruders_per_tower_layer(print);
+        REQUIRE(layers.size() == TOWER_LAYERS);
+        for (size_t i = GAP_FIRST; i <= GAP_LAST; ++i) {
             CAPTURE(i);
             CHECK(layers[i] == std::vector<unsigned int>{0});
         }
@@ -261,7 +286,7 @@ TEST_CASE("Isolated sections are at least the minimum depth and separated by a g
 
     const WipeTowerData& data = print.wipe_tower_data();
     REQUIRE(data.sections.size() == 2);
-    for (const WipeTowerData::Section& s : data.sections) {
+    for (const WipeTower2::Section& s : data.sections) {
         CAPTURE(s.category, s.y_start, s.y_end);
         CHECK(s.y_end - s.y_start >= 12.f - 0.01f);
     }
@@ -282,7 +307,7 @@ static int category_of(const Print& print, unsigned int tool)
     return tool < v.size() ? v[tool] : 0;
 }
 
-static const WipeTowerData::Section& section_for(const WipeTowerData& data, int category)
+static const WipeTower2::Section& section_for(const WipeTowerData& data, int category)
 {
     for (const auto& s : data.sections)
         if (s.category == category)
@@ -331,7 +356,9 @@ TEST_CASE("Isolated sections are only extruded by their own category", "[PrimeTo
                 // Either in its own section (plus wall) or outside the whole footprint (brim loops).
                 const bool in_own = e.pos.y() >= own.y_start - wall_tol && e.pos.y() <= own.y_end + wall_tol;
                 const bool outside_footprint = e.pos.y() < footprint_min - brim_tol || e.pos.y() > footprint_max + brim_tol;
-                CHECK((in_own || outside_footprint));
+                const bool placed_in_own_or_brim = in_own || outside_footprint;
+                CAPTURE(in_own, outside_footprint);
+                CHECK(placed_in_own_or_brim);
                 if (in_own) ++inside_own;
                 if (outside_footprint) ++brim;
             }
@@ -380,8 +407,8 @@ TEST_CASE("Sparse isolated layer prints only the active section with the current
     print.process();
     const WipeTowerData& data = print.wipe_tower_data();
     REQUIRE(data.sections.size() == 2);
-    const WipeTowerData::Section& pla  = section_for(data, 100);
-    const WipeTowerData::Section& petg = section_for(data, 300);
+    const WipeTower2::Section& pla  = section_for(data, 100);
+    const WipeTower2::Section& petg = section_for(data, 300);
 
     size_t sparse_layers = 0;
     for (const auto& layer : data.tool_changes) {
@@ -403,7 +430,8 @@ TEST_CASE("Sparse isolated layer prints only the active section with the current
                 CHECK(e.tool == 0u);
                 CHECK(e.pos.y() >= pla.y_start - 1.f);
                 CHECK(e.pos.y() <= pla.y_end + 1.f);
-                CHECK_FALSE((e.pos.y() > petg.y_start + 0.01f && e.pos.y() < petg.y_end - 0.01f));
+                const bool inside_petg = e.pos.y() > petg.y_start + 0.01f && e.pos.y() < petg.y_end - 0.01f;
+                CHECK_FALSE(inside_petg);
             }
     }
     CHECK(sparse_layers >= 5);
@@ -416,6 +444,11 @@ TEST_CASE("Isolation with a single category warns and leaves the tower unchanged
     add_gap_objects(model);
     DynamicPrintConfig on = two_material_config(true);
     on.option<ConfigOptionInts>("filament_adhesiveness_category")->values = {100, 100};
+    SECTION("rectangle walls") { on.set_deserialize_strict("wipe_tower_wall_type", "rectangle"); }
+    SECTION("rib walls and framework stay in effect") {
+        on.set_deserialize_strict("wipe_tower_wall_type", "rib");
+        on.set("prime_tower_enable_framework", true);
+    }
     DynamicPrintConfig off = on;
     off.set("prime_tower_isolate_materials", false);
 
@@ -443,6 +476,26 @@ TEST_CASE("Isolation with a single category warns and leaves the tower unchanged
             CHECK(a.tool_changes[i][j].gcode == b.tool_changes[i][j].gcode);
         }
     }
+}
+
+TEST_CASE("Isolated tower reports its full footprint up to the top", "[PrimeTowerIsolation]")
+{
+    // The PETG section (nearer y=0 or not, depending on block order) ends below the PLA section;
+    // a shrinking centred box would no longer cover the section still printing.
+    Model model;
+    add_gap_objects(model);
+    Print print;
+    print.set_status_silent();
+    print.apply(model, two_material_config(true));
+    print.process();
+    const WipeTowerData& data = print.wipe_tower_data();
+    REQUIRE(data.z_and_depth_pairs.size() >= 2);
+    for (size_t i = 0; i + 1 < data.z_and_depth_pairs.size(); ++i) {
+        CAPTURE(i, data.z_and_depth_pairs[i].first);
+        CHECK_THAT(double(data.z_and_depth_pairs[i].second), WithinAbs(double(data.depth), 1e-4));
+    }
+    CHECK_THAT(double(data.z_and_depth_pairs.back().first), WithinAbs(double(data.height), 1e-4));
+    CHECK_THAT(double(data.z_and_depth_pairs.back().second), WithinAbs(0., 1e-6));
 }
 
 TEST_CASE("Isolated prime tower exports G-code with more toolchanges and unchanged X extents", "[PrimeTowerIsolation]")

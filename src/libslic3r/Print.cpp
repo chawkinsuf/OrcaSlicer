@@ -1780,8 +1780,7 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
         if (m_config.prime_tower_isolate_materials && warning != nullptr && warning->string.empty()) {
             std::set<int> categories;
             for (unsigned int extruder : extruders)
-                categories.insert(extruder < m_config.filament_adhesiveness_category.values.size()
-                                      ? m_config.filament_adhesiveness_category.values[extruder] : 0);
+                categories.insert(filament_category(m_config, extruder));
             if (categories.size() < 2) {
                 warning->string  = L("Isolate materials in prime tower has no effect: all filaments in use share the same adhesiveness category.");
                 warning->opt_key = "prime_tower_isolate_materials";
@@ -3521,9 +3520,8 @@ void Print::_make_wipe_tower()
         }
 
         std::vector<int> categories;
-        for (size_t i = 0; i < m_config.filament_adhesiveness_category.values.size(); ++i) {
-            categories.push_back(m_config.filament_adhesiveness_category.get_at(i));
-        }
+        for (unsigned int i = 0; i < number_of_extruders; ++i)
+            categories.push_back(filament_category(m_config, i));
         wipe_tower.set_filament_categories(categories);
 
         // Generate the wipe tower layers.
@@ -3540,8 +3538,7 @@ void Print::_make_wipe_tower()
         m_wipe_tower_data.height            = wipe_tower.get_wipe_tower_height();
         m_wipe_tower_data.bbx               = wipe_tower.get_bbx();
         m_wipe_tower_data.rib_offset = wipe_tower.get_rib_offset();
-        for (const WipeTower2::Section& s : wipe_tower.get_sections())
-            m_wipe_tower_data.sections.push_back({s.category, s.y_start, s.y_end});
+        m_wipe_tower_data.sections          = wipe_tower.get_sections();
 
         // Unload the current filament over the purge tower.
         coordf_t layer_height = m_objects.front()->config().layer_height.value;

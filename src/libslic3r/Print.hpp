@@ -745,8 +745,7 @@ struct WipeTowerData
     float                                                 depth;
     std::vector<std::pair<float, float>>                  z_and_depth_pairs;
     // Material isolation: tower-local Y range of each adhesiveness category's section interior.
-    struct Section { int category; float y_start; float y_end; };
-    std::vector<Section>                                  sections;
+    std::vector<WipeTower2::Section>                      sections;
     std::vector<std::vector<WipeTower::box_coordinates>>  local_z_reserve_boxes;
     float                                                 brim_width;
     float                                                 height;

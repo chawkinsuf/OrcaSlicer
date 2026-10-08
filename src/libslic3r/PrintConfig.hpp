@@ -1924,6 +1924,13 @@ private:
 bool is_XL_printer(const DynamicPrintConfig &cfg);
 bool is_XL_printer(const PrintConfig &cfg);
 
+// Adhesiveness category of a filament. Filaments beyond the end of the category list are category 0.
+inline int filament_category(const PrintConfig &cfg, size_t filament_id)
+{
+    const auto &categories = cfg.filament_adhesiveness_category.values;
+    return filament_id < categories.size() ? categories[filament_id] : 0;
+}
+
 Points get_bed_shape(const DynamicPrintConfig &cfg);
 Points get_bed_shape(const PrintConfig &cfg);
 Points get_bed_shape(const SLAPrinterConfig &cfg);
