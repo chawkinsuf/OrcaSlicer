@@ -721,3 +721,43 @@ TEST_CASE("Isolated tower never starts a pass outside its brim", "[PrimeTowerIso
         }
     }
 }
+
+TEST_CASE("Every layer with a toolchange has tower extrusion to purge into", "[PrimeTowerIsolation]")
+{
+    // Isolation inserts toolchanges on layers that had none; each of them must land on a tower
+    // layer that actually extrudes, or the purge happens in mid-air.
+    Model model;
+    add_gap_objects(model);
+    Print print;
+    print.set_status_silent();
+    print.apply(model, two_material_config(true));
+    print.process();
+    const WipeTowerData& data = print.wipe_tower_data();
+    // Tower layers that really extrude something, by print_z.
+    std::vector<double> extruding_z;
+    for (const auto& layer : data.tool_changes) {
+        bool has_toolchange = false, extruded = false;
+        double z = -1.;
+        for (const WipeTower::ToolChangeResult& tcr : layer) {
+            z = tcr.print_z;
+            has_toolchange |= tcr.is_tool_change;
+            for (const WipeTower::Extrusion& e : tcr.extrusions)
+                extruded |= e.width > 0.f;
+        }
+        CAPTURE(z, has_toolchange);
+        if (has_toolchange)
+            CHECK(extruded);
+        if (extruded)
+            extruding_z.push_back(z);
+    }
+    // Every layer the tool ordering prints with more than one extruder must have such a tower layer.
+    size_t multi_extruder_layers = 0;
+    for (const LayerTools& lt : print.get_tool_ordering()) {
+        if (lt.extruders.size() < 2)
+            continue;
+        ++multi_extruder_layers;
+        CAPTURE(lt.print_z);
+        CHECK(std::any_of(extruding_z.begin(), extruding_z.end(), [&](double z) { return std::abs(z - lt.print_z) < 1e-3; }));
+    }
+    CHECK(multi_extruder_layers > 0);
+}
