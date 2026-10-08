@@ -8,6 +8,9 @@
 #include "libslic3r/GCode/ToolOrdering.hpp"
 
 #include <algorithm>
+#include <fstream>
+#include <boost/filesystem.hpp>
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 #include <vector>
 
 using namespace Slic3r;
@@ -438,4 +441,46 @@ TEST_CASE("Isolation with a single category warns and leaves the tower unchanged
             CHECK(a.tool_changes[i][j].gcode == b.tool_changes[i][j].gcode);
         }
     }
+}
+
+TEST_CASE("Isolated prime tower exports G-code with more toolchanges and unchanged X extents", "[PrimeTowerIsolation]")
+{
+    using Catch::Matchers::WithinAbs;
+    Model model;
+    add_gap_objects(model);
+    auto run = [&](bool isolate) {
+        CAPTURE(isolate);
+        Print print;
+        print.set_status_silent();
+        DynamicPrintConfig config = two_material_config(isolate);
+        config.set("prime_tower_min_section_depth", 15.);
+        print.apply(model, config);
+        print.process();
+        boost::filesystem::path path = boost::filesystem::temp_directory_path() /
+            boost::filesystem::unique_path("isolation-%%%%-%%%%.gcode");
+        GCodeProcessorResult result;
+        const std::string output_path = print.export_gcode(path.string(), &result, nullptr);
+        REQUIRE(!output_path.empty());
+        std::ifstream in(output_path);
+        std::string gcode((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        in.close();
+        boost::filesystem::remove(output_path);
+        REQUIRE(!gcode.empty());
+        return std::make_pair(gcode, print.wipe_tower_data().bbx);
+    };
+    auto [gcode_off, bbx_off] = run(false);
+    auto [gcode_on, bbx_on]   = run(true);
+
+    CHECK_THAT(bbx_on.min.x(), WithinAbs(bbx_off.min.x(), 1e-3));
+    CHECK_THAT(bbx_on.max.x(), WithinAbs(bbx_off.max.x(), 1e-3));
+    CHECK(bbx_on.size().y() > bbx_off.size().y());
+
+    auto count = [](const std::string& s, const std::string& needle) {
+        size_t n = 0, pos = 0;
+        while ((pos = s.find(needle, pos)) != std::string::npos) { ++n; pos += needle.size(); }
+        return n;
+    };
+    // Isolation adds toolchanges on the gap layers and never removes any.
+    CHECK(count(gcode_on, "; CP TOOLCHANGE START") > count(gcode_off, "; CP TOOLCHANGE START"));
+    CHECK(count(gcode_on, "; CP EMPTY GRID START") > 0);
 }
