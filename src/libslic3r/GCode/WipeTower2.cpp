@@ -4254,8 +4254,11 @@ void WipeTower2::generate_wipe_tower_blocks(bool add_solid_flag)
         // No taper: a section keeps its maximum depth (at least m_min_section_depth) on every
         // layer where its category is active, and ends where the category is no longer active.
         // Each layer's depth also carries the spacing between the sections active on it.
+        // Depths are aligned to the line-width grid so that align_perimeter() leaves the section
+        // walls where they are laid out; otherwise it would push neighbouring walls into each
+        // other and close the air gap.
         for (auto& block : m_wipe_tower_blocks)
-            block.depth = std::max(block.depth, m_min_section_depth);
+            block.depth = align_ceil(std::max(block.depth, m_min_section_depth), m_perimeter_width);
         for (size_t layer_id = 0; layer_id < m_plan.size(); ++layer_id) {
             int active = 0;
             m_plan[layer_id].depth = 0;
@@ -4633,10 +4636,19 @@ WipeTower::ToolChangeResult WipeTower2::finish_block(const WipeTowerBlock& block
             m_wipe_tower_width,
             block.layer_depths[m_cur_layer_id] + m_perimeter_width);
         wall_box = align_perimeter(wall_box);
-        writer.rectangle(wall_box, feedrate);
-        Polygon wall_polygon({ Point::new_scale(wall_box.ld.x(), wall_box.ld.y()), Point::new_scale(wall_box.rd.x(), wall_box.rd.y()),
-                               Point::new_scale(wall_box.ru.x(), wall_box.ru.y()), Point::new_scale(wall_box.lu.x(), wall_box.lu.y()) });
-        Polyline wall_line = to_polyline(wall_polygon);
+        Polygon wall_polygon = generate_rectange_polygon(wall_box.ld, wall_box.ru);
+        // Wall gap: leave the entry gap at this layer's toolchange entry points that lie on this
+        // section's side walls, exactly as the shared outer wall did.
+        std::vector<Vec2f> skip_points;
+        if (m_use_gap_wall && m_cur_layer_id >= 0 && size_t(m_cur_layer_id) < m_wall_skip_points.size()) {
+            for (const Vec2f& pt : m_wall_skip_points[m_cur_layer_id])
+                if (pt.y() >= wall_box.ld.y() - WT_EPSILON && pt.y() <= wall_box.lu.y() + WT_EPSILON)
+                    skip_points.push_back(pt);
+        }
+        Polygon   insert_skip_polygon;
+        Polylines wall_paths = contrust_gap_for_skip_points(wall_polygon, skip_points, m_wipe_tower_width, 2.5f * m_perimeter_width, insert_skip_polygon);
+        writer.generate_path(wall_paths, feedrate, m_filpar[filament_id].retract_length, m_filpar[filament_id].retract_speed * 60.f, m_used_fillet);
+        Polyline wall_line = to_polyline(insert_skip_polygon);
         wall_line.translate(0, scaled(m_y_shift));
         m_outer_wall[m_z_pos].push_back(wall_line);
         wt_box = wall_box;

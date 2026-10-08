@@ -8,6 +8,8 @@
 #include "libslic3r/GCode/ToolOrdering.hpp"
 
 #include <algorithm>
+#include <limits>
+#include <cmath>
 #include <fstream>
 #include <boost/filesystem.hpp>
 #include "libslic3r/GCode/GCodeProcessor.hpp"
@@ -483,4 +485,138 @@ TEST_CASE("Isolated prime tower exports G-code with more toolchanges and unchang
     // Isolation adds toolchanges on the gap layers and never removes any.
     CHECK(count(gcode_on, "; CP TOOLCHANGE START") > count(gcode_off, "; CP TOOLCHANGE START"));
     CHECK(count(gcode_on, "; CP EMPTY GRID START") > 0);
+}
+
+namespace {
+// Tower line width as WipeTower2 derives it (nozzle diameter times Width_To_Nozzle_Ratio).
+static float tower_line_width(const Print& print) { return float(print.config().nozzle_diameter.get_at(0)) * 1.25f; }
+
+struct WallSegment { Vec2f a, b; unsigned int tool; };
+
+// Extruded segments (width > 0) of every tower layer, reconstructed from consecutive end positions.
+static std::vector<std::vector<WallSegment>> segments_per_layer(const WipeTowerData& data)
+{
+    std::vector<std::vector<WallSegment>> out;
+    for (const auto& layer : data.tool_changes) {
+        std::vector<WallSegment> segs;
+        for (const WipeTower::ToolChangeResult& tcr : layer) {
+            Vec2f prev = tcr.start_pos;
+            for (const WipeTower::Extrusion& e : tcr.extrusions) {
+                if (e.width > 0.f)
+                    segs.push_back({prev, e.pos, e.tool});
+                prev = e.pos;
+            }
+        }
+        out.push_back(std::move(segs));
+    }
+    return out;
+}
+
+// Horizontal wall lines (both ends at the same y) of a tool's category outside its section interior.
+static std::vector<float> horizontal_wall_ys(const std::vector<WallSegment>& segs, const Print& print, const WipeTowerData& data, int category)
+{
+    const auto& own = section_for(data, category);
+    std::vector<float> ys;
+    for (const WallSegment& s : segs) {
+        if (category_of(print, s.tool) != category || std::abs(s.a.y() - s.b.y()) > 0.01f || std::abs(s.a.x() - s.b.x()) < 5.f)
+            continue;
+        // The bottom wall sits one line below the interior, the top wall exactly at its end.
+        // Brim and chamfer loops lie outside the whole footprint and are shared by design; skip them.
+        const float pw = tower_line_width(print);
+        float footprint_min = data.sections.front().y_start, footprint_max = data.sections.front().y_end;
+        for (const auto& sec : data.sections) { footprint_min = std::min(footprint_min, sec.y_start); footprint_max = std::max(footprint_max, sec.y_end); }
+        if (s.a.y() < footprint_min - pw - 0.05f || s.a.y() > footprint_max + 0.05f)
+            continue;
+        if (s.a.y() < own.y_start - 0.01f || s.a.y() > own.y_end - 0.01f)
+            ys.push_back(s.a.y());
+    }
+    return ys;
+}
+} // namespace
+
+TEST_CASE("Isolated section walls keep a clear gap when the section depth is not a multiple of the line width", "[PrimeTowerIsolation]")
+{
+    Model model;
+    add_gap_objects(model);
+    DynamicPrintConfig config = two_material_config(true);
+    config.set("prime_tower_min_section_depth", 20.3); // above the purge-driven depth, not a multiple of the 0.5 mm line width
+    Print print;
+    print.set_status_silent();
+    print.apply(model, config);
+    print.process();
+    const WipeTowerData& data = print.wipe_tower_data();
+    REQUIRE(data.sections.size() == 2);
+    const float pw = tower_line_width(print);
+    const auto layers = segments_per_layer(data);
+
+    size_t checked_layers = 0;
+    for (size_t li = 0; li < layers.size(); ++li) {
+        std::vector<float> ys_a = horizontal_wall_ys(layers[li], print, data, data.sections[0].category);
+        std::vector<float> ys_b = horizontal_wall_ys(layers[li], print, data, data.sections[1].category);
+        if (ys_a.empty() || ys_b.empty())
+            continue; // only one section active, or brim-only layer
+        ++checked_layers;
+        // Each section has a wall line one line width below its interior and one at its interior end.
+        for (size_t si = 0; si < 2; ++si) {
+            const auto& s = data.sections[si];
+            const auto& ys = si == 0 ? ys_a : ys_b;
+            CAPTURE(li, si, s.y_start, s.y_end, pw, ys);
+            CHECK(std::any_of(ys.begin(), ys.end(), [&](float y) { return std::abs(y - (s.y_start - pw)) < 0.05f; }));
+            CHECK(std::any_of(ys.begin(), ys.end(), [&](float y) { return std::abs(y - s.y_end) < 0.05f; }));
+        }
+        // The nearest wall lines of the two categories are at least two line widths apart (one line of air).
+        float min_dist = std::numeric_limits<float>::max();
+        for (float ya : ys_a)
+            for (float yb : ys_b)
+                min_dist = std::min(min_dist, std::abs(ya - yb));
+        CAPTURE(li, min_dist, pw);
+        CHECK(min_dist >= 2.f * pw - 0.05f);
+    }
+    CHECK(checked_layers >= 10);
+}
+
+TEST_CASE("Isolated section wall has an entry gap where a toolchange enters it", "[PrimeTowerIsolation]")
+{
+    Model model;
+    add_gap_objects(model);
+    DynamicPrintConfig config = two_material_config(true);
+    REQUIRE(config.opt_bool("wipe_tower_wall_gap"));
+    Print print;
+    print.set_status_silent();
+    print.apply(model, config);
+    print.process();
+    const WipeTowerData& data = print.wipe_tower_data();
+    REQUIRE(data.sections.size() == 2);
+    const float pw = tower_line_width(print);
+    const float width = float(print.config().prime_tower_width.value);
+    const auto layers = segments_per_layer(data);
+
+    size_t checked = 0;
+    for (size_t li = 1; li < data.tool_changes.size(); ++li) { // skip the first layer (brim/adhesion rules)
+        for (const WipeTower::ToolChangeResult& tcr : data.tool_changes[li]) {
+            if (!tcr.is_tool_change)
+                continue;
+            const Vec2f entry = tcr.tool_change_start_pos;
+            const bool left = std::abs(entry.x()) < width / 2.f;
+            const float side_x = left ? 0.f : width;
+            const int category = category_of(print, unsigned(tcr.new_tool));
+            const auto& own = section_for(data, category);
+            if (entry.y() < own.y_start - pw || entry.y() > own.y_end + pw)
+                continue; // entry not on this section's side wall
+            // Vertical wall segments of this category on the entry side must not span the entry y.
+            bool covered = false;
+            for (const WallSegment& s : layers[li]) {
+                if (category_of(print, s.tool) != category) continue;
+                if (std::abs(s.a.x() - side_x) > 0.05f || std::abs(s.b.x() - side_x) > 0.05f) continue;
+                const float lo = std::min(s.a.y(), s.b.y()), hi = std::max(s.a.y(), s.b.y());
+                if (hi - lo < 0.01f) continue;
+                if (lo < entry.y() - 0.5f * pw && hi > entry.y() + 0.5f * pw)
+                    covered = true;
+            }
+            CAPTURE(li, tcr.print_z, tcr.new_tool, entry.x(), entry.y(), side_x);
+            CHECK_FALSE(covered);
+            ++checked;
+        }
+    }
+    CHECK(checked >= 10);
 }
