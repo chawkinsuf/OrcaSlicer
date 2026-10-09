@@ -186,7 +186,61 @@ Polylines WipeTower2::isolation_section_wall(const WipeTowerBlock& block, WipeTo
     Polyline wall_line = to_polyline(insert_skip_polygon);
     wall_line.translate(0, scaled(m_y_shift));
     m_outer_wall[m_z_pos].push_back(wall_line);
+    isolation_section_brim(block, wall_polygon, wall_paths);
     return wall_paths;
+}
+
+// Called from isolation_section_wall(). Each section has its own brim, printed by its own
+// material right after its wall: the loops the stock tower would draw around the whole footprint
+// (first-layer brim, then the chamfer that tapers it into the wall over the next few layers when
+// prime_tower_brim_chamfer is on) are drawn around this section's outline and clipped at the
+// midline of the gap on each side it shares with a neighbour. The sections are spaced so that
+// the innermost loop of each goes all the way around (see section_spacing()); the outer loops
+// are cut at the midline and only continue outside the footprint.
+void WipeTower2::isolation_section_brim(const WipeTowerBlock& block, const Polygon& outline, Polylines& paths)
+{
+    const float spacing   = m_perimeter_width - m_layer_height * float(1. - M_PI_4);
+    int         loops_num = int((m_wipe_tower_brim_width + spacing / 2.f) / spacing);
+    const bool  first_layer = is_first_layer();
+    if (!first_layer) {
+        const int layer_idx = int(m_layer_info - m_plan.begin());
+        if (!m_prime_tower_brim_chamfer || m_first_layer_idx == size_t(-1) || m_first_layer_idx >= m_plan.size())
+            loops_num = 0;
+        else if (block.layer_depths[layer_idx] != block.layer_depths[m_first_layer_idx])
+            loops_num = 0; // stop the chamfer if the section's depth changes (as the stock tower does for the whole tower)
+        else {
+            const float max_chamfer_width = 3.f;
+            loops_num = std::min(loops_num, int(max_chamfer_width / spacing)) - (layer_idx - int(m_first_layer_idx));
+        }
+    }
+    if (loops_num <= 0)
+        return;
+
+    // This section's band: from the gap midline below to the gap midline above, open on the
+    // sides where it owns the footprint edge. Midlines come from the laid-out (largest) depths so
+    // that neighbouring bands always meet, whatever a section's depth is on this layer.
+    const bool  first = &block == &m_wipe_tower_blocks.front();
+    const bool  last  = &block == &m_wipe_tower_blocks.back();
+    const float far   = m_wipe_tower_brim_width + m_rib_length + m_wipe_tower_width + m_wipe_tower_depth;
+    const float half_gap = (section_spacing() - m_perimeter_width) / 2.f; // wall centre to midline
+    const float low  = first ? -far : block.start_depth - m_perimeter_width - half_gap;
+    const float high = last ? m_wipe_tower_depth + far : block.start_depth + block.depth + half_gap;
+    Polygon band = generate_rectange_polygon(Vec2f(-far, low), Vec2f(m_wipe_tower_width + far, high));
+
+    Polygon loop = outline;
+    for (int i = 0; i < loops_num; ++i) {
+        loop = offset(loop, scaled(spacing)).front();
+        Polyline closed = to_polyline(loop);
+        closed.points.push_back(closed.points.front());
+        for (Polyline& part : intersection_pl(Polylines{closed}, band)) {
+            Polyline recorded = part;
+            recorded.translate(0, scaled(m_y_shift));
+            m_outer_wall[m_z_pos].push_back(recorded);
+            paths.push_back(std::move(part));
+        }
+    }
+    if (first_layer) // actual brim width, for the skirt and the preview box (as finish_layer_new does)
+        m_wipe_tower_brim_width_real = loops_num * spacing + spacing / 2.f;
 }
 
 // Called from finish_layer_new() on the first layer. The stock tower records how far the rib

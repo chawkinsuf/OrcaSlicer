@@ -59,11 +59,11 @@ New print settings in the Prime Tower group:
 | `prime_tower_min_section_depth` | float (mm) | 10 | Minimum section depth |
 
 Tooltip for `prime_tower_isolate_materials`: "Give each filament
-adhesiveness category its own walled section of the prime tower, printed
-only by filaments of that category, so dissimilar materials never stack.
-Adds a toolchange on layers that would otherwise not use a material. Prints
-the brim on the first layer only. Rib walls brace the front and back
-sections; cone walls are printed as rectangle walls."
+adhesiveness category its own walled section of the prime tower, with its
+own brim, printed only by filaments of that category, so dissimilar
+materials never touch. Adds a toolchange on layers that would otherwise not
+use a material. Rib walls brace the front and back sections; cone walls are
+printed as rectangle walls."
 
 Tooltip for `prime_tower_min_section_depth`: "Minimum depth of each
 material section when materials are isolated. Prevents lightly used
@@ -124,9 +124,12 @@ more toolchange to return. Accepted for the U1.
   where the block is active. Tower depth is the sum of section depths plus
   gaps.
 - **Gap.** Adjacent sections are separated by one line width of clear air
-  (wall centres two line widths apart), so the two walls never fuse. Lateral
-  bracing between columns is not a design requirement; if real prints show
-  columns need it, the gap can become a setting later.
+  (wall centres two line widths apart), so the two walls never fuse. When
+  the tower has a brim the gap is one line wider, so that the innermost brim
+  line of each section fits and each brim goes all the way around its
+  section (wall centres three line widths apart). Lateral bracing between
+  columns is not a design requirement; if real prints show columns need it,
+  the gap can become a setting later.
 - **Per-section walls.** `finish_block` already draws a rectangle around
   the block's remaining area. In isolation mode that rectangle is the
   section's outer wall, inset by the gap, and the shared outer perimeter in
@@ -159,14 +162,17 @@ more toolchange to return. Accepted for the U1.
   spacing, and the first-layer rib offset comes from the brim pass outline.
 - **Contact and solid layers.** The dissimilar-interface logic (Contact,
   Contact_UP, Solid) is skipped, since nothing dissimilar stacks.
-- **First layer and brim.** Usual first-layer rules, one brim around the
-  whole footprint. The brim chamfer (the stock tower tapers the brim into
-  the wall over the next few layers) is forced off: it is printed by
-  whichever tool finishes the layer, which under isolation may be a
-  different category than the brim below it. The existing
-  `prime_tower_brim_chamfer` flag (developer mode, hidden from the tab on
-  main) is honoured by the block tower path again at the same time; the sync
-  that introduced that path had dropped it.
+- **First layer and brim.** Usual first-layer rules. The brim is per
+  section: the loops the stock tower draws around the whole footprint (the
+  first-layer brim, then the chamfer that tapers it into the wall over the
+  next few layers when `prime_tower_brim_chamfer` is on) are drawn around
+  each section's outline by that section's material and clipped at the
+  midline of the gap on each side shared with a neighbour. So each column
+  has a brim bonded to its own wall, and the chamfer stacks on a brim of the
+  same material. The shared brim pass in `finish_layer_new` draws nothing.
+  The `prime_tower_brim_chamfer` flag (developer mode, hidden from the tab
+  on main) is honoured by the block tower path again at the same time; the
+  sync that introduced that path had dropped it.
 - **Final purge, local-Z and nozzle-change paths** keep working: they
   already target a block by category.
 

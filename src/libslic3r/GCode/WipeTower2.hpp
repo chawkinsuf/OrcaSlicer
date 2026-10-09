@@ -244,7 +244,9 @@ private:
     bool isolation_active() const { return m_isolate_materials && m_wipe_tower_blocks.size() > 1; }
     // Isolation: Y distance between two neighbouring section interiors = their two wall lines
     // plus one line of clear air. Depends on m_perimeter_width, which set_extruder() sets.
-    float section_spacing() const { return isolation_active() ? 3.f * m_perimeter_width : 0.f; }
+    // Interior-to-interior spacing between sections: two wall lines plus one line of air, or
+    // plus one brim line of each section when the tower has a brim (WipeTowerIsolation.cpp).
+    float section_spacing() const { return isolation_active() ? (m_wipe_tower_brim_width > 0.f ? 4.f : 3.f) * m_perimeter_width : 0.f; }
     bool m_enable_tower_interface_features = false;
     bool m_enable_tower_interface_cooldown_during_tower = false;
     size_t m_cur_layer_id;
@@ -504,6 +506,7 @@ private:
     std::vector<WipeTower::ToolChangeResult> isolation_finish_sparse_sections(bool extrude_fill);
     int isolation_finish_filament(const WipeTowerBlock& block, const WipeTowerInfo& layer, int candidate, int fallback);
     Polylines isolation_section_wall(const WipeTowerBlock& block, WipeTower::box_coordinates& wall_box);
+    void isolation_section_brim(const WipeTowerBlock& block, const Polygon& outline, Polylines& paths);
 
 };
 

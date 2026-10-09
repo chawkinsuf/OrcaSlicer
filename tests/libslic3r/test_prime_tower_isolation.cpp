@@ -296,8 +296,8 @@ TEST_CASE("Isolated sections are at least the minimum depth and separated by a g
         CHECK(s.y_end - s.y_start >= 12.f - 0.01f);
     }
     // Sections are ordered by y and do not overlap. Between two interiors there are two wall
-    // lines plus one line of air, so the spacing is at least three line widths; with the
-    // default config the tower line width is about 0.45 mm.
+    // lines plus one line of air, or two brim lines with a brim (the default), so the spacing is
+    // three or four line widths; with the default config the tower line width is 0.5 mm.
     REQUIRE(data.sections[0].y_end < data.sections[1].y_start);
     CHECK(data.sections[1].y_start - data.sections[0].y_end >= 3.f * 0.4f);
     CHECK(data.sections[1].y_start - data.sections[0].y_end <= 3.f * 0.7f);
@@ -333,8 +333,9 @@ TEST_CASE("Isolated sections are only extruded by their own category", "[PrimeTo
 
     const WipeTowerData& data = print.wipe_tower_data();
     REQUIRE(data.sections.size() == 2);
-    const float wall_tol = 0.5f;  // a section's own wall line sits one line width outside its interior
+    const float wall_tol = 1.0f;  // a section's own wall line sits one line width outside its interior, its innermost brim line one brim spacing beyond that
     const float brim_tol = 0.3f;  // brim loops start one line spacing beyond the footprint
+    const float width    = float(print.config().prime_tower_width.value); // rectangle walls: the footprint's x extent
     float footprint_min = data.sections.front().y_start, footprint_max = data.sections.front().y_end;
     for (const auto& s : data.sections) {
         footprint_min = std::min(footprint_min, s.y_start);
@@ -358,9 +359,12 @@ TEST_CASE("Isolated sections are only extruded by their own category", "[PrimeTo
                     const bool inside_other = e.pos.y() > other.y_start + 0.01f && e.pos.y() < other.y_end - 0.01f;
                     CHECK_FALSE(inside_other);
                 }
-                // Either in its own section (plus wall) or outside the whole footprint (brim loops).
+                // Either in its own section (plus wall and innermost brim line) or outside the whole footprint (brim loops).
                 const bool in_own = e.pos.y() >= own.y_start - wall_tol && e.pos.y() <= own.y_end + wall_tol;
-                const bool outside_footprint = e.pos.y() < footprint_min - brim_tol || e.pos.y() > footprint_max + brim_tol;
+                // Beyond the footprint in y, or past its x edges (the outer brim loops run down the
+                // sides and are cut at the gap midline, so their ends lie level with the gap).
+                const bool outside_footprint = e.pos.y() < footprint_min - brim_tol || e.pos.y() > footprint_max + brim_tol ||
+                                               e.pos.x() < -brim_tol || e.pos.x() > width + brim_tol;
                 const bool placed_in_own_or_brim = in_own || outside_footprint;
                 CAPTURE(in_own, outside_footprint);
                 CHECK(placed_in_own_or_brim);
@@ -578,8 +582,10 @@ static std::vector<float> horizontal_wall_ys(const std::vector<WallSegment>& seg
     for (const WallSegment& s : segs) {
         if (category_of(print, s.tool) != category || std::abs(s.a.y() - s.b.y()) > 0.01f || std::abs(s.a.x() - s.b.x()) < 5.f)
             continue;
+        if (std::min(s.a.x(), s.b.x()) < -0.1f)
+            continue; // brim and chamfer loops reach past the tower's x edges; wall lines start at x = 0
         // The bottom wall sits one line below the interior, the top wall exactly at its end.
-        // Brim and chamfer loops lie outside the whole footprint and are shared by design; skip them.
+        // Skip anything outside the whole footprint (brim and chamfer loops, rib fins).
         const float pw = tower_line_width(print);
         float footprint_min = data.sections.front().y_start, footprint_max = data.sections.front().y_end;
         for (const auto& sec : data.sections) { footprint_min = std::min(footprint_min, sec.y_start); footprint_max = std::max(footprint_max, sec.y_end); }
@@ -861,50 +867,143 @@ TEST_CASE("Two spools of one category purge exactly as they do without isolation
     CHECK(print_on.wipe_tower_data().sections.size() == 2);
 }
 
-TEST_CASE("Isolated tower prints its brim on the first layer only", "[PrimeTowerIsolation]")
+namespace {
+// Extrusions of a layer beyond the footprint in y, split by side, with how many of them are not
+// the category of the section on that side. Under isolation only a section's own brim, chamfer
+// and rib fins may lie beyond the footprint on its side.
+struct BeyondFootprint { size_t front = 0, back = 0, front_wrong_category = 0, back_wrong_category = 0; };
+static BeyondFootprint beyond_footprint(const Print& print, const WipeTowerData& data, size_t layer)
 {
-    // The stock tower tapers the brim into the wall over the next few layers (brim chamfer),
-    // printed by whichever tool finishes the layer. Under isolation that tool can belong to a
-    // different category than the first-layer brim, which stacks PETG on a PLA brim: the very
-    // thing isolation exists to avoid. So the chamfer is forced off and nothing is extruded
-    // outside the footprint above the first layer, whatever prime_tower_brim_chamfer says.
+    const float pw = tower_line_width(print);
+    const WipeTower2::Section* front = &data.sections.front();
+    const WipeTower2::Section* back  = &data.sections.front();
+    for (const auto& s : data.sections) {
+        if (s.y_start < front->y_start) front = &s;
+        if (s.y_end > back->y_end) back = &s;
+    }
+    BeyondFootprint out;
+    for (const auto& tcr : data.tool_changes[layer]) {
+        for (const auto& e : tcr.extrusions) {
+            if (e.width <= 0.f)
+                continue;
+            const int category = category_of(print, e.tool);
+            if (e.pos.y() < front->y_start - pw - 0.05f) {
+                ++out.front;
+                if (category != front->category) ++out.front_wrong_category;
+            } else if (e.pos.y() > back->y_end + 0.05f) {
+                ++out.back;
+                if (category != back->category) ++out.back_wrong_category;
+            }
+        }
+    }
+    return out;
+}
+} // namespace
+
+TEST_CASE("Each isolated section prints its own brim in its own material", "[PrimeTowerIsolation]")
+{
+    // The brim is per section: the whole-tower brim loops are clipped at the midline of the gap
+    // between sections, so the front section's brim is printed by its own category and the back
+    // section's by its own. The sections are spaced so that the innermost loop of each goes all
+    // the way around: in the gap there is one brim line of each category on layer 1.
+    Model model;
+    add_gap_objects(model);
+    Print print;
+    print.set_status_silent();
+    print.apply(model, two_material_config(true));
+    print.process();
+    const WipeTowerData& data = print.wipe_tower_data();
+    REQUIRE(data.sections.size() == 2);
+    REQUIRE(data.tool_changes.size() > 2);
+    const BeyondFootprint b = beyond_footprint(print, data, 0);
+    CAPTURE(b.front, b.back, b.front_wrong_category, b.back_wrong_category);
+    CHECK(b.front > 0);
+    CHECK(b.back > 0);
+    CHECK(b.front_wrong_category == 0);
+    CHECK(b.back_wrong_category == 0);
+
+    // In the gap between the two sections on layer 1: long horizontal lines of both categories,
+    // each on its own side of the midline.
+    const auto& front = data.sections[0];
+    const auto& back  = data.sections[1];
+    REQUIRE(front.y_end < back.y_start);
+    const float mid = (front.y_end + back.y_start) / 2.f;
+    size_t front_lines = 0, back_lines = 0, misplaced = 0;
+    const auto layers = segments_per_layer(data);
+    for (const WallSegment& seg : layers[0]) {
+        if (std::abs(seg.a.y() - seg.b.y()) > 0.01f || std::abs(seg.a.x() - seg.b.x()) < 5.f)
+            continue;
+        const float y = seg.a.y();
+        if (y <= front.y_end + 0.01f || y >= back.y_start - 0.01f)
+            continue; // walls and interiors
+        const int category = category_of(print, seg.tool);
+        if (category == front.category && y < mid) ++front_lines;
+        else if (category == back.category && y > mid) ++back_lines;
+        else ++misplaced;
+    }
+    CAPTURE(front.y_end, back.y_start, mid, front_lines, back_lines, misplaced);
+    CHECK(front_lines > 0);
+    CHECK(back_lines > 0);
+    CHECK(misplaced == 0);
+}
+
+TEST_CASE("Isolated section brim chamfer follows the flag, per section", "[PrimeTowerIsolation]")
+{
+    // Each section's chamfer loops stack on its own brim in its own material, so the chamfer is
+    // no longer forced off: with the flag on, the layers above the first carry loops beyond the
+    // footprint on each side in that side's category; with it off, nothing is printed beyond the
+    // footprint above the first layer.
     Model model;
     add_gap_objects(model);
     DynamicPrintConfig config = two_material_config(true);
-    SECTION("chamfer flag on") { config.set("prime_tower_brim_chamfer", true); }
-    SECTION("chamfer flag off") { config.set("prime_tower_brim_chamfer", false); }
+    bool chamfer = true;
+    SECTION("flag on") { chamfer = true; }
+    SECTION("flag off") { chamfer = false; }
+    config.set("prime_tower_brim_chamfer", chamfer);
     Print print;
     print.set_status_silent();
     print.apply(model, config);
     print.process();
     const WipeTowerData& data = print.wipe_tower_data();
-    REQUIRE(data.tool_changes.size() > 2);
-    const float pw = tower_line_width(print);
-    float footprint_min = data.sections.front().y_start, footprint_max = data.sections.front().y_end;
-    for (const auto& s : data.sections) {
-        footprint_min = std::min(footprint_min, s.y_start);
-        footprint_max = std::max(footprint_max, s.y_end);
+    REQUIRE(data.sections.size() == 2);
+    REQUIRE(data.tool_changes.size() > 4);
+    BeyondFootprint upper;
+    for (size_t li = 1; li < data.tool_changes.size(); ++li) {
+        const BeyondFootprint b = beyond_footprint(print, data, li);
+        upper.front += b.front; upper.back += b.back;
+        upper.front_wrong_category += b.front_wrong_category; upper.back_wrong_category += b.back_wrong_category;
     }
-    // The first section's bottom wall sits one line below the footprint; anything farther out is brim.
-    auto outside = [&](float y) { return y < footprint_min - pw - 0.05f || y > footprint_max + 0.05f; };
+    CAPTURE(chamfer, upper.front, upper.back, upper.front_wrong_category, upper.back_wrong_category);
+    CHECK(upper.front_wrong_category == 0);
+    CHECK(upper.back_wrong_category == 0);
+    if (chamfer) {
+        CHECK(upper.front > 0);
+        CHECK(upper.back > 0);
+    } else {
+        CHECK(upper.front == 0);
+        CHECK(upper.back == 0);
+    }
+}
 
-    size_t first_layer_brim = 0, upper_brim = 0;
-    for (size_t li = 0; li < data.tool_changes.size(); ++li) {
-        for (const WipeTower::ToolChangeResult& tcr : data.tool_changes[li]) {
-            for (const WipeTower::Extrusion& e : tcr.extrusions) {
-                if (e.width <= 0.f || !outside(e.pos.y()))
-                    continue;
-                if (li == 0) {
-                    ++first_layer_brim;
-                } else {
-                    CAPTURE(li, tcr.print_z, e.tool, e.pos.y(), footprint_min, footprint_max);
-                    ++upper_brim;
-                }
-            }
-        }
-    }
-    CHECK(first_layer_brim > 0);
-    CHECK(upper_brim == 0);
+TEST_CASE("Isolated sections are spaced for two brim lines when the tower has a brim", "[PrimeTowerIsolation]")
+{
+    // Between two sections there are two wall lines plus, with a brim, one brim line of each
+    // section; without a brim, one line of air.
+    Model model;
+    add_gap_objects(model);
+    DynamicPrintConfig config = two_material_config(true);
+    float lines = 0.f;
+    SECTION("with brim: four line widths") { config.set("prime_tower_brim_width", 3.); lines = 4.f; }
+    SECTION("without brim: three line widths") { config.set("prime_tower_brim_width", 0.); lines = 3.f; }
+    Print print;
+    print.set_status_silent();
+    print.apply(model, config);
+    print.process();
+    const WipeTowerData& data = print.wipe_tower_data();
+    REQUIRE(data.sections.size() == 2);
+    const float pw = tower_line_width(print);
+    CAPTURE(lines, pw, data.sections[0].y_end, data.sections[1].y_start);
+    CHECK_THAT(double(data.sections[1].y_start - data.sections[0].y_end), WithinAbs(double(lines * pw), 0.01));
 }
 
 TEST_CASE("Stock tower honours the brim chamfer flag", "[PrimeTowerIsolation]")
@@ -1068,6 +1167,7 @@ TEST_CASE("Rib walls keep isolated sections at full depth", "[PrimeTowerIsolatio
     // footprint too), and only rectangle walls taper.
     DynamicPrintConfig config = three_filament_config(true);
     config.set_deserialize_strict("wipe_tower_wall_type", "rib");
+    config.set("prime_tower_brim_chamfer", false); // the chamfer loops above the wall would read as a higher top
     Model model;
     add_three_filament_objects(model);
     Print print;
@@ -1098,36 +1198,17 @@ TEST_CASE("Rib walls keep isolated sections at full depth", "[PrimeTowerIsolatio
 }
 
 namespace {
-// Extrusions of every layer above the first that lie beyond the footprint in y: under isolation
-// nothing shared is printed there, so these are rib fins (or nothing).
+// Extrusions of every layer above the first that lie beyond the footprint in y, with the
+// chamfer off so that only rib fins (or nothing) remain.
 struct FinCount { size_t front = 0, back = 0, front_wrong_category = 0, back_wrong_category = 0, layers_with_fins = 0; };
 static FinCount count_fins(const Print& print, const WipeTowerData& data)
 {
-    const float pw = tower_line_width(print);
-    const WipeTower2::Section* front = &data.sections.front();
-    const WipeTower2::Section* back  = &data.sections.front();
-    for (const auto& s : data.sections) {
-        if (s.y_start < front->y_start) front = &s;
-        if (s.y_end > back->y_end) back = &s;
-    }
     FinCount out;
     for (size_t li = 1; li < data.tool_changes.size(); ++li) {
-        bool any = false;
-        for (const auto& tcr : data.tool_changes[li]) {
-            for (const auto& e : tcr.extrusions) {
-                if (e.width <= 0.f)
-                    continue;
-                const int category = category_of(print, e.tool);
-                if (e.pos.y() < front->y_start - pw - 0.05f) {
-                    ++out.front; any = true;
-                    if (category != front->category) ++out.front_wrong_category;
-                } else if (e.pos.y() > back->y_end + 0.05f) {
-                    ++out.back; any = true;
-                    if (category != back->category) ++out.back_wrong_category;
-                }
-            }
-        }
-        if (any) ++out.layers_with_fins;
+        const BeyondFootprint b = beyond_footprint(print, data, li);
+        out.front += b.front; out.back += b.back;
+        out.front_wrong_category += b.front_wrong_category; out.back_wrong_category += b.back_wrong_category;
+        if (b.front + b.back > 0) ++out.layers_with_fins;
     }
     return out;
 }
@@ -1143,6 +1224,7 @@ TEST_CASE("Isolated rib tower gives the front and back sections fins in their ow
     add_gap_objects(model);
     DynamicPrintConfig config = two_material_config(true);
     config.set_deserialize_strict("wipe_tower_wall_type", "rib");
+    config.set("prime_tower_brim_chamfer", false); // so that only fins lie beyond the footprint above layer 1
     Print print;
     print.set_status_silent();
     print.apply(model, config);
@@ -1169,6 +1251,7 @@ TEST_CASE("Cone walls fall back to rectangle walls under isolation with a warnin
     add_gap_objects(model);
     DynamicPrintConfig config = two_material_config(true);
     config.set_deserialize_strict("wipe_tower_wall_type", "cone");
+    config.set("prime_tower_brim_chamfer", false); // so that nothing but a cone could lie beyond the footprint above layer 1
     Print print;
     print.set_status_silent();
     print.apply(model, config);

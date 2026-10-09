@@ -6347,10 +6347,10 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("prime_tower_isolate_materials", coBool);
     def->label = L("Isolate materials in prime tower");
-    def->tooltip = L("Give each filament adhesiveness category its own walled section of the prime tower, "
-                     "printed only by filaments of that category, so dissimilar materials never stack. "
+    def->tooltip = L("Give each filament adhesiveness category its own walled section of the prime tower, with its own brim, "
+                     "printed only by filaments of that category, so dissimilar materials never touch. "
                      "Adds a toolchange on layers that would otherwise not use a material. "
-                     "Prints the brim on the first layer only. Rib walls brace the front and back sections; cone walls are printed as rectangle walls.");
+                     "Rib walls brace the front and back sections; cone walls are printed as rectangle walls.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 

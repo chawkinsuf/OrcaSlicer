@@ -2825,9 +2825,9 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer_new(bool extrude_perimeter,
     m_current_layer_finished = true;
 
     if (isolation_active()) {
-        // Material isolation: there is no shared outer wall and no shared fill. Each section's
-        // wall and fill are printed by finish_block() with that section's own material. This
-        // function then only contributes the brim loops around the whole footprint.
+        // Material isolation: there is no shared outer wall, fill or brim. Each section's wall,
+        // brim and fill are printed by finish_block() with that section's own material. This
+        // function then only records the first-layer rib offset and the layer bookkeeping.
         extrude_perimeter = false;
         extrude_fill      = false;
         extrude_fill_wall = false;
@@ -2987,11 +2987,13 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer_new(bool extrude_perimeter,
     // How many perimeters shall the brim have?
     int loops_num = (m_wipe_tower_brim_width + spacing / 2.f) / spacing;
     const float max_chamfer_width = 3.f;
-    if (!first_layer) {
-        if (!m_prime_tower_brim_chamfer || isolation_active()) {
-            // Brim chamfer disabled, or material isolation: the chamfer would be printed by
-            // whichever tool finishes this layer, on top of a first-layer brim that may be
-            // another category. Brim on the first layer only.
+    if (isolation_active()) {
+        // Material isolation: each section prints its own brim and chamfer (WipeTowerIsolation.cpp).
+        loops_num = 0;
+    }
+    else if (!first_layer) {
+        if (!m_prime_tower_brim_chamfer) {
+            // Brim chamfer disabled: brim on the first layer only.
             loops_num = 0;
         }
         // stop print chamfer if depth changes
