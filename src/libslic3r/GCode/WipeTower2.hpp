@@ -505,7 +505,7 @@ private:
     void isolation_set_rib_offset(const Polygon& outer_wall);
     std::vector<WipeTower::ToolChangeResult> isolation_finish_sparse_sections(bool extrude_fill);
     int isolation_finish_filament(const WipeTowerBlock& block, const WipeTowerInfo& layer, int candidate, int fallback);
-    Polylines isolation_section_wall(const WipeTowerBlock& block, WipeTower::box_coordinates& wall_box);
+    Polylines isolation_section_wall(const WipeTowerBlock& block, WipeTower::box_coordinates& wall_box, Polylines& brim_paths);
     void isolation_section_brim(const WipeTowerBlock& block, const Polygon& outline, Polylines& paths);
 
 };

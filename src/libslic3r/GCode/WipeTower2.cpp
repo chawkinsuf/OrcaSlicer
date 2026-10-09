@@ -1172,7 +1172,11 @@ public:
         return extrude_arc_explicit(arc, f, false, limit_flow);
     }
 
-    void generate_path(Polylines& pls, float feedrate, float retract_length, float retract_speed, bool used_fillet)
+    // Extrudes the polylines in order. By default the list is entered at the segment nearest the
+    // nozzle and wrapped round at the end (a closed wall gets its seam there); with start_at_closest
+    // false it is extruded from its first segment, after a retracted travel if that is not where
+    // the nozzle is.
+    void generate_path(Polylines& pls, float feedrate, float retract_length, float retract_speed, bool used_fillet, bool start_at_closest = true)
     {
         auto get_closet_idx = [this](std::vector<Segment>& corners) -> int {
             Vec2f anchor{this->m_current_pos.x(), this->m_current_pos.y()};
@@ -1221,9 +1225,15 @@ public:
             }
         }
 
-        int index_of_closest = get_closet_idx(segments);
+        int index_of_closest = start_at_closest ? get_closet_idx(segments) : 0;
         int i                = index_of_closest;
-        travel(segments[i].start); // travel to the closest points
+        if (start_at_closest)
+            travel(segments[i].start); // travel to the closest points
+        else if ((segments[i].start - Vec2f(m_current_pos.x(), m_current_pos.y())).norm() > EPSILON) {
+            retract(retract_length, retract_speed);
+            travel(segments[i].start, 600.);
+            retract(-retract_length, retract_speed);
+        }
         segments[i].is_arc ? extrude_arc(segments[i].arcsegment, feedrate) : extrude(segments[i].end, feedrate);
         do {
             i = (i + 1) % segments.size();
@@ -4594,8 +4604,11 @@ WipeTower::ToolChangeResult WipeTower2::finish_block(const WipeTowerBlock& block
 
     if (isolation_active()) {
         // Material isolation: this section's own wall replaces the shared outer wall.
-        Polylines wall_paths = isolation_section_wall(block, wt_box);
+        Polylines brim_paths;
+        Polylines wall_paths = isolation_section_wall(block, wt_box, brim_paths);
         writer.generate_path(wall_paths, feedrate, m_filpar[filament_id].retract_length, m_filpar[filament_id].retract_speed * 60.f, m_used_fillet);
+        if (!brim_paths.empty()) // after the whole wall, and from the brim's own start so its flow stays in one piece
+            writer.generate_path(brim_paths, feedrate, m_filpar[filament_id].retract_length, m_filpar[filament_id].retract_speed * 60.f, m_used_fillet, false);
         finish_rect_wipe_path.clear();
     }
 

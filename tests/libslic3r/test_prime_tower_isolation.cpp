@@ -1040,6 +1040,43 @@ TEST_CASE("An isolated section's brim is one continuous flow", "[PrimeTowerIsola
     CHECK(b.pickups <= 1);
 }
 
+TEST_CASE("An isolated section's wall is finished before its brim starts", "[PrimeTowerIsolation]")
+{
+    // The writer starts a path list at the segment nearest the nozzle and wraps round at the end.
+    // With the wall and the brim in one list that could print part of the wall, then the brim,
+    // then travel back for the rest of the wall. The brim is extruded on its own, so everything
+    // inside the footprint (fill and wall) is done before the first brim line.
+    Model model;
+    add_gap_objects(model);
+    Print print;
+    print.set_status_silent();
+    print.apply(model, two_material_config(true));
+    print.process();
+    const WipeTowerData& data = print.wipe_tower_data();
+    REQUIRE(data.sections.size() == 2);
+    const float pw    = tower_line_width(print);
+    const float width = float(print.config().prime_tower_width.value);
+    const auto layers = segments_per_layer(data);
+    for (const auto& section : data.sections) {
+        size_t last_inside = 0, first_outside = SIZE_MAX, inside = 0, outside = 0;
+        for (size_t i = 0; i < layers[0].size(); ++i) {
+            const WallSegment& seg = layers[0][i];
+            if (category_of(print, seg.tool) != section.category)
+                continue;
+            bool in = true;
+            for (const Vec2f& p : {seg.a, seg.b})
+                if (p.x() < -0.05f || p.x() > width + 0.05f || p.y() < section.y_start - pw - 0.05f || p.y() > section.y_end + 0.05f)
+                    in = false;
+            if (in) { last_inside = i; ++inside; }
+            else { first_outside = std::min(first_outside, i); ++outside; }
+        }
+        CAPTURE(section.category, inside, outside, last_inside, first_outside);
+        REQUIRE(inside > 0);
+        REQUIRE(outside > 0);
+        CHECK(last_inside < first_outside);
+    }
+}
+
 TEST_CASE("Isolated section brim chamfer follows the flag, per section", "[PrimeTowerIsolation]")
 {
     // Each section's chamfer loops stack on its own brim in its own material, so the chamfer is

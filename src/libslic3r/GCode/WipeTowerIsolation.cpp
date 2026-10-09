@@ -148,9 +148,10 @@ int WipeTower2::isolation_finish_filament(const WipeTowerBlock& block, const Wip
 // whole tower's rib outline clipped to this section's band, so the first section carries the two
 // front fins and the last section the two back fins, each printed as part of that section's loop.
 // Leaves the entry gap at this layer's toolchange entry points that lie on this section's side
-// walls, exactly as the shared outer wall did. Returns the paths to extrude; wall_box receives the
-// wall rectangle and the closed wall outline is recorded in m_outer_wall.
-Polylines WipeTower2::isolation_section_wall(const WipeTowerBlock& block, WipeTower::box_coordinates& wall_box)
+// walls, exactly as the shared outer wall did. Returns the wall paths to extrude and the section's
+// brim paths in brim_paths (extruded after the whole wall, see isolation_section_brim()); wall_box
+// receives the wall rectangle and the closed wall outline is recorded in m_outer_wall.
+Polylines WipeTower2::isolation_section_wall(const WipeTowerBlock& block, WipeTower::box_coordinates& wall_box, Polylines& brim_paths)
 {
     wall_box = WipeTower::box_coordinates(
         Vec2f(0.f, block.start_depth - m_perimeter_width),
@@ -187,12 +188,12 @@ Polylines WipeTower2::isolation_section_wall(const WipeTowerBlock& block, WipeTo
     Polyline wall_line = to_polyline(insert_skip_polygon);
     wall_line.translate(0, scaled(m_y_shift));
     m_outer_wall[m_z_pos].push_back(wall_line);
-    isolation_section_brim(block, wall_polygon, wall_paths);
+    isolation_section_brim(block, wall_polygon, brim_paths);
     return wall_paths;
 }
 
 // Called from isolation_section_wall(). Each section has its own brim, printed by its own
-// material right after its wall: the loops the stock tower would draw around the whole footprint
+// material right after its wall (as its own path list, so the wall is finished first): the loops the stock tower would draw around the whole footprint
 // (first-layer brim, then the chamfer that tapers it into the wall over the next few layers when
 // prime_tower_brim_chamfer is on) are drawn around this section's outline. The sections are spaced
 // so that the innermost loop goes all the way around (see section_spacing()). The outer loops
