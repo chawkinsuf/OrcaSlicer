@@ -948,14 +948,16 @@ TEST_CASE("Each isolated section prints its own brim in its own material", "[Pri
     CHECK(misplaced == 0);
 }
 
-TEST_CASE("Outer brim loops of an isolated section end on a bar of its own material", "[PrimeTowerIsolation]")
+TEST_CASE("An isolated section's brim is one continuous flow", "[PrimeTowerIsolation]")
 {
-    // Only the innermost brim loop of a section goes all the way around. The outer loops are cut
-    // on the gap side, and a loose end facing the neighbour's loose end is where a nozzle catches.
-    // So the innermost loop's gap-side line is extended outwards past the footprint as far as the
-    // outermost loop (a bar), the outer loops are clipped at that bar, and the two sections' bars
-    // run parallel: every cut loop ends on its own material, and no brim of one section reaches
-    // past its bar towards the other.
+    // Only the innermost brim loop of a section goes all the way around. On the gap side the
+    // outer loops are cut, and a loose end facing the neighbour's loose end is where a nozzle
+    // catches. So the innermost loop's gap-side line is extended outwards past the footprint as
+    // far as the outermost loop (a bar) and the outer loops are clipped at that bar. The innermost
+    // loop, the bars and the outermost loop are one path, and the loops in between are a serpentine
+    // chained onto it (each stepping out along the bar), so that the whole brim is laid in one
+    // flow with no pickups: every cut loop ends on its own material, and no brim of one section
+    // reaches past its bar towards the other.
     Model model;
     add_gap_objects(model);
     Print print;
@@ -980,44 +982,62 @@ TEST_CASE("Outer brim loops of an isolated section end on a bar of its own mater
     const float reach     = float(loops - 1) * spacing; // from the innermost loop to the outermost
     const auto layers = segments_per_layer(data);
 
-    struct Side { size_t bar_segments = 0; size_t beyond_bar = 0; size_t first_bar = SIZE_MAX; size_t first_outer_loop = SIZE_MAX; };
-    auto inspect = [&](int category, float bar_y, bool is_front) {
+    struct Side { size_t bar_segments = 0; size_t joined_bars = 0; size_t beyond_bar = 0; size_t pickups = 0; };
+    auto inspect = [&](const WipeTower2::Section& section, float bar_y, bool is_front) {
         Side out;
-        for (size_t i = 0; i < layers[0].size(); ++i) {
-            const WallSegment& seg = layers[0][i];
-            if (category_of(print, seg.tool) != category)
+        const auto& segs = layers[0];
+        auto on_bar_line = [&](const WallSegment& seg) { return std::abs(seg.a.y() - bar_y) < 0.05f && std::abs(seg.b.y() - bar_y) < 0.05f; };
+        for (size_t i = 0; i < segs.size(); ++i) {
+            const WallSegment& seg = segs[i];
+            if (category_of(print, seg.tool) != section.category)
                 continue;
             const float x0 = std::min(seg.a.x(), seg.b.x()), x1 = std::max(seg.a.x(), seg.b.x());
             // The bar: horizontal, on the bar line, lying outside the footprint and reaching the outermost loop.
-            if (std::abs(seg.a.y() - bar_y) < 0.05f && std::abs(seg.b.y() - bar_y) < 0.05f) {
+            if (on_bar_line(seg)) {
                 const bool left  = x1 <= 0.05f && x0 <= -reach - spacing + 0.1f;
                 const bool right = x0 >= width - 0.05f && x1 >= width + reach + spacing - 0.1f;
-                if (left || right) { ++out.bar_segments; out.first_bar = std::min(out.first_bar, i); }
+                if (left || right) {
+                    ++out.bar_segments;
+                    // Joined to the outermost loop: the segment extruded just before or after it
+                    // continues from the bar's outer end, off the bar line.
+                    const Vec2f outer_end = left ? (seg.a.x() < seg.b.x() ? seg.a : seg.b) : (seg.a.x() > seg.b.x() ? seg.a : seg.b);
+                    for (size_t j : {i - 1, i + 1}) {
+                        if (j >= segs.size() || on_bar_line(segs[j]))
+                            continue;
+                        if ((segs[j].a - outer_end).norm() < 0.05f || (segs[j].b - outer_end).norm() < 0.05f) { ++out.joined_bars; break; }
+                    }
+                }
             }
-            // An outer loop: beyond the innermost loop on the footprint's sides, off the bar line.
-            else if ((x0 < -spacing - 0.3f || x1 > width + spacing + 0.3f) &&
-                     !(std::abs(seg.a.y() - bar_y) < 0.05f && std::abs(seg.b.y() - bar_y) < 0.05f))
-                out.first_outer_loop = std::min(out.first_outer_loop, i);
             // Nothing of this section beyond its bar towards the neighbour, on the outside of the footprint.
             for (const Vec2f& p : {seg.a, seg.b})
                 if ((p.x() < -0.3f || p.x() > width + 0.3f) && (is_front ? p.y() > bar_y + 0.3f : p.y() < bar_y - 0.3f))
                     ++out.beyond_bar;
         }
+        // Pickups into the brim: a path that starts (after a travel) outside the section's walls.
+        // One: the innermost loop and everything beyond it are a single flow.
+        for (const WipeTower::ToolChangeResult& tcr : data.tool_changes[0])
+            for (const WipeTower::Extrusion& e : tcr.extrusions) {
+                if (e.width > 0.f || category_of(print, e.tool) != section.category)
+                    continue;
+                const bool outside = e.pos.x() < -0.1f || e.pos.x() > width + 0.1f ||
+                                     e.pos.y() < section.y_start - pw - 0.1f || e.pos.y() > section.y_end + 0.1f;
+                if (outside)
+                    ++out.pickups;
+            }
         return out;
     };
-    const Side f = inspect(front.category, bar_front, true);
-    const Side b = inspect(back.category, bar_back, false);
-    CAPTURE(spacing, loops, reach, bar_front, bar_back, f.bar_segments, f.beyond_bar, b.bar_segments, b.beyond_bar,
-            f.first_bar, f.first_outer_loop, b.first_bar, b.first_outer_loop);
+    const Side f = inspect(front, bar_front, true);
+    const Side b = inspect(back, bar_back, false);
+    CAPTURE(spacing, loops, reach, bar_front, bar_back, f.bar_segments, f.joined_bars, f.beyond_bar, f.pickups,
+            b.bar_segments, b.joined_bars, b.beyond_bar, b.pickups);
     CHECK(f.bar_segments >= 2); // left and right
     CHECK(b.bar_segments >= 2);
+    CHECK(f.joined_bars == f.bar_segments);
+    CHECK(b.joined_bars == b.bar_segments);
     CHECK(f.beyond_bar == 0);
     CHECK(b.beyond_bar == 0);
-    // The bars are drawn before the outer loops, so each loop starts and ends on its bar like on a wall.
-    REQUIRE(f.first_outer_loop != SIZE_MAX);
-    REQUIRE(b.first_outer_loop != SIZE_MAX);
-    CHECK(f.first_bar < f.first_outer_loop);
-    CHECK(b.first_bar < b.first_outer_loop);
+    CHECK(f.pickups <= 1);
+    CHECK(b.pickups <= 1);
 }
 
 TEST_CASE("Isolated section brim chamfer follows the flag, per section", "[PrimeTowerIsolation]")

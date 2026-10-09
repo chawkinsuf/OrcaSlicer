@@ -201,9 +201,13 @@ isolation off.
   fins included, right after its wall and in its material. The innermost
   loop goes all the way around. On a side shared with a neighbour the outer
   loops are clipped at the innermost loop's gap-side line, and that line is
-  extended outwards past the footprint as far as the outermost loop (a bar,
-  printed before them so each loop starts and ends on it like on a wall),
-  so every cut loop ends on its own
+  extended outwards past the footprint as far as the outermost loop (a bar).
+  The brim is one flow per strip: the innermost loop, from the corner the
+  bar leaves from and back to it, out along the bar, round the outermost
+  loop, back in along the other bar, then the loops in between as a
+  serpentine from the inside out, each stepping out one spacing along the
+  bar it ends on. So the whole brim needs one pickup, every cut loop ends on
+  its own
   material and the two sections' bars run parallel; no loose end of one
   material faces the other. So each column has a brim bonded to its own
   wall, the chamfer stacks on a brim of the same material, and the shared

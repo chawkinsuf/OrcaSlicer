@@ -239,9 +239,10 @@ void WipeTower2::isolation_section_brim(const WipeTowerBlock& block, const Polyg
     const bool  last  = &block == &m_wipe_tower_blocks.back();
     const float far   = m_wipe_tower_brim_width + m_rib_length + m_wipe_tower_width + m_wipe_tower_depth;
     Polygon ring = offset(outline, scaled(spacing)).front();
-    record(closed_polyline(ring));
-    if (loops_num == 1)
+    if (loops_num == 1) {
+        record(closed_polyline(ring));
         return;
+    }
     const BoundingBox ring_bbox = get_extents(ring);
     const float bar_low  = unscaled<float>(ring_bbox.min.y());
     const float bar_high = unscaled<float>(ring_bbox.max.y());
@@ -249,22 +250,93 @@ void WipeTower2::isolation_section_brim(const WipeTowerBlock& block, const Polyg
     const float high = last ? m_wipe_tower_depth + far : bar_high;
     Polygon band = generate_rectange_polygon(Vec2f(-far, low), Vec2f(m_wipe_tower_width + far, high));
 
-    // Bars first, from the innermost loop's side out to the outermost loop's side on each shared
-    // side, so that each outer loop then starts and ends on its bar like on a wall.
-    const float inner_l = -spacing, inner_r = m_wipe_tower_width + spacing;
-    const float outer_l = -spacing * float(loops_num), outer_r = m_wipe_tower_width + spacing * float(loops_num);
-    for (float y : {first ? std::numeric_limits<float>::quiet_NaN() : bar_low, last ? std::numeric_limits<float>::quiet_NaN() : bar_high}) {
-        if (std::isnan(y))
-            continue;
-        record(Polyline(Point::new_scale(Vec2f(inner_l, y)), Point::new_scale(Vec2f(outer_l, y))));
-        record(Polyline(Point::new_scale(Vec2f(inner_r, y)), Point::new_scale(Vec2f(outer_r, y))));
+    // Loop k (k = 1 innermost) clipped to the band: one piece per strip, i.e. one around the owned
+    // sides for an end section, or one down each side for a middle section. Clipping a closed
+    // polyline can split a piece at the loop's start point; join such pieces back up.
+    const coord_t eps = scaled(0.01f);
+    auto clipped_loop = [&](int k) {
+        Polygon loop = offset(outline, scaled(spacing * float(k))).front();
+        Polylines pieces = intersection_pl(Polylines{closed_polyline(loop)}, band);
+        for (bool joined = true; joined;) {
+            joined = false;
+            for (size_t i = 0; i < pieces.size() && !joined; ++i)
+                for (size_t j = 0; j < pieces.size() && !joined; ++j) {
+                    if (i == j) continue;
+                    Polyline& a = pieces[i];
+                    Polyline& b = pieces[j];
+                    if ((a.last_point() - b.first_point()).cwiseAbs().maxCoeff() <= eps) {
+                        a.points.insert(a.points.end(), b.points.begin() + 1, b.points.end());
+                        pieces.erase(pieces.begin() + j);
+                        joined = true;
+                    } else if ((a.last_point() - b.last_point()).cwiseAbs().maxCoeff() <= eps) {
+                        a.points.insert(a.points.end(), b.points.rbegin() + 1, b.points.rend());
+                        pieces.erase(pieces.begin() + j);
+                        joined = true;
+                    }
+                }
+        }
+        return pieces;
+    };
+    // The bar's inner end for a piece end on the gap side: on the innermost loop's side line.
+    auto bar_inner = [&](const Point& p) {
+        const float x = unscaled<float>(p.x()) < m_wipe_tower_width / 2.f ? -spacing : m_wipe_tower_width + spacing;
+        return Point::new_scale(Vec2f(x, unscaled<float>(p.y())));
+    };
+    // The piece of loop k on the same strip as point p (same side of the tower, ending on the same
+    // bar line), turned so that it starts there.
+    auto next_piece = [&](Polylines& pieces, const Point& p) -> Polyline* {
+        const bool left = unscaled<float>(p.x()) < m_wipe_tower_width / 2.f;
+        for (Polyline& piece : pieces) {
+            if (piece.points.size() < 2)
+                continue; // already used
+            for (bool at_front : {true, false}) {
+                const Point& e = at_front ? piece.first_point() : piece.last_point();
+                if (std::abs(e.y() - p.y()) <= eps && (unscaled<float>(e.x()) < m_wipe_tower_width / 2.f) == left) {
+                    if (!at_front) piece.reverse();
+                    return &piece;
+                }
+            }
+        }
+        return nullptr;
+    };
+
+    // Each strip is one flow: from the innermost loop out along the bar, round the outermost loop,
+    // back in along the other bar, then the loops in between as a serpentine from the inside out,
+    // each stepping out one spacing along the bar it ends on (retracing that much of the bar). The
+    // innermost loop itself leads into the first strip's flow: it starts and ends at the corner
+    // the bar leaves from. So the whole brim needs one pickup, and every path end lies on this
+    // section's own material.
+    std::vector<Polylines> inner_loops;
+    for (int k = 2; k < loops_num; ++k)
+        inner_loops.push_back(clipped_loop(k));
+    bool ring_pending = true;
+    for (Polyline& outer : clipped_loop(loops_num)) {
+        Polyline flow;
+        const Point corner = bar_inner(outer.first_point());
+        if (ring_pending) {
+            auto at = std::find_if(ring.points.begin(), ring.points.end(), [&](const Point& p) { return (p - corner).cwiseAbs().maxCoeff() <= eps; });
+            if (at != ring.points.end()) {
+                std::rotate(ring.points.begin(), at, ring.points.end());
+                flow = closed_polyline(ring); // ends back at the corner
+                ring_pending = false;
+            }
+        }
+        if (flow.points.empty())
+            flow.points.push_back(corner);
+        flow.points.insert(flow.points.end(), outer.points.begin(), outer.points.end());
+        flow.points.push_back(bar_inner(outer.last_point()));
+        for (Polylines& pieces : inner_loops) {
+            Polyline* piece = next_piece(pieces, flow.last_point());
+            assert(piece != nullptr);
+            if (piece == nullptr)
+                break;
+            flow.points.insert(flow.points.end(), piece->points.begin(), piece->points.end());
+            piece->points.clear(); // used
+        }
+        record(std::move(flow));
     }
-    Polygon loop = ring;
-    for (int i = 1; i < loops_num; ++i) {
-        loop = offset(loop, scaled(spacing)).front();
-        for (Polyline& part : intersection_pl(Polylines{closed_polyline(loop)}, band))
-            record(std::move(part));
-    }
+    if (ring_pending) // no strip starts at a ring corner (cannot happen with a rectangular gap side)
+        record(closed_polyline(ring));
     if (first_layer) // actual brim width, for the skirt and the preview box (as finish_layer_new does)
         m_wipe_tower_brim_width_real = loops_num * spacing + spacing / 2.f;
 }
