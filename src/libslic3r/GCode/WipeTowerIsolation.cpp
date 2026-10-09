@@ -198,8 +198,9 @@ Polylines WipeTower2::isolation_section_wall(const WipeTowerBlock& block, WipeTo
 // so that the innermost loop goes all the way around (see section_spacing()). The outer loops
 // cannot: on a side shared with a neighbour they are clipped at the innermost loop's gap-side
 // line, and that line is extended outwards past the footprint as far as the outermost loop (a
-// bar, printed last so it lies over the loop ends). So every cut loop ends on this section's own
-// material, the two neighbours' bars run parallel, and no loose end faces the other material.
+// bar, printed before them so each loop starts and ends on it like on a wall). So every cut loop
+// ends on this section's own material, the two neighbours' bars run parallel, and no loose end
+// faces the other material.
 void WipeTower2::isolation_section_brim(const WipeTowerBlock& block, const Polygon& outline, Polylines& paths)
 {
     const float spacing   = m_perimeter_width - m_layer_height * float(1. - M_PI_4);
@@ -248,13 +249,8 @@ void WipeTower2::isolation_section_brim(const WipeTowerBlock& block, const Polyg
     const float high = last ? m_wipe_tower_depth + far : bar_high;
     Polygon band = generate_rectange_polygon(Vec2f(-far, low), Vec2f(m_wipe_tower_width + far, high));
 
-    Polygon loop = ring;
-    for (int i = 1; i < loops_num; ++i) {
-        loop = offset(loop, scaled(spacing)).front();
-        for (Polyline& part : intersection_pl(Polylines{closed_polyline(loop)}, band))
-            record(std::move(part));
-    }
-    // Bars: from the innermost loop's side out to the outermost loop's side, on each shared side.
+    // Bars first, from the innermost loop's side out to the outermost loop's side on each shared
+    // side, so that each outer loop then starts and ends on its bar like on a wall.
     const float inner_l = -spacing, inner_r = m_wipe_tower_width + spacing;
     const float outer_l = -spacing * float(loops_num), outer_r = m_wipe_tower_width + spacing * float(loops_num);
     for (float y : {first ? std::numeric_limits<float>::quiet_NaN() : bar_low, last ? std::numeric_limits<float>::quiet_NaN() : bar_high}) {
@@ -262,6 +258,12 @@ void WipeTower2::isolation_section_brim(const WipeTowerBlock& block, const Polyg
             continue;
         record(Polyline(Point::new_scale(Vec2f(inner_l, y)), Point::new_scale(Vec2f(outer_l, y))));
         record(Polyline(Point::new_scale(Vec2f(inner_r, y)), Point::new_scale(Vec2f(outer_r, y))));
+    }
+    Polygon loop = ring;
+    for (int i = 1; i < loops_num; ++i) {
+        loop = offset(loop, scaled(spacing)).front();
+        for (Polyline& part : intersection_pl(Polylines{closed_polyline(loop)}, band))
+            record(std::move(part));
     }
     if (first_layer) // actual brim width, for the skirt and the preview box (as finish_layer_new does)
         m_wipe_tower_brim_width_real = loops_num * spacing + spacing / 2.f;

@@ -202,7 +202,8 @@ isolation off.
   loop goes all the way around. On a side shared with a neighbour the outer
   loops are clipped at the innermost loop's gap-side line, and that line is
   extended outwards past the footprint as far as the outermost loop (a bar,
-  printed last over the loop ends), so every cut loop ends on its own
+  printed before them so each loop starts and ends on it like on a wall),
+  so every cut loop ends on its own
   material and the two sections' bars run parallel; no loose end of one
   material faces the other. So each column has a brim bonded to its own
   wall, the chamfer stacks on a brim of the same material, and the shared

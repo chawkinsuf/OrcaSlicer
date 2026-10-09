@@ -19,6 +19,7 @@
 #include <vector>
 #include <tuple>
 #include <optional>
+#include <cstdint>
 
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
@@ -979,10 +980,11 @@ TEST_CASE("Outer brim loops of an isolated section end on a bar of its own mater
     const float reach     = float(loops - 1) * spacing; // from the innermost loop to the outermost
     const auto layers = segments_per_layer(data);
 
-    struct Side { size_t bar_segments = 0; size_t beyond_bar = 0; };
+    struct Side { size_t bar_segments = 0; size_t beyond_bar = 0; size_t first_bar = SIZE_MAX; size_t first_outer_loop = SIZE_MAX; };
     auto inspect = [&](int category, float bar_y, bool is_front) {
         Side out;
-        for (const WallSegment& seg : layers[0]) {
+        for (size_t i = 0; i < layers[0].size(); ++i) {
+            const WallSegment& seg = layers[0][i];
             if (category_of(print, seg.tool) != category)
                 continue;
             const float x0 = std::min(seg.a.x(), seg.b.x()), x1 = std::max(seg.a.x(), seg.b.x());
@@ -990,8 +992,12 @@ TEST_CASE("Outer brim loops of an isolated section end on a bar of its own mater
             if (std::abs(seg.a.y() - bar_y) < 0.05f && std::abs(seg.b.y() - bar_y) < 0.05f) {
                 const bool left  = x1 <= 0.05f && x0 <= -reach - spacing + 0.1f;
                 const bool right = x0 >= width - 0.05f && x1 >= width + reach + spacing - 0.1f;
-                if (left || right) ++out.bar_segments;
+                if (left || right) { ++out.bar_segments; out.first_bar = std::min(out.first_bar, i); }
             }
+            // An outer loop: beyond the innermost loop on the footprint's sides, off the bar line.
+            else if ((x0 < -spacing - 0.3f || x1 > width + spacing + 0.3f) &&
+                     !(std::abs(seg.a.y() - bar_y) < 0.05f && std::abs(seg.b.y() - bar_y) < 0.05f))
+                out.first_outer_loop = std::min(out.first_outer_loop, i);
             // Nothing of this section beyond its bar towards the neighbour, on the outside of the footprint.
             for (const Vec2f& p : {seg.a, seg.b})
                 if ((p.x() < -0.3f || p.x() > width + 0.3f) && (is_front ? p.y() > bar_y + 0.3f : p.y() < bar_y - 0.3f))
@@ -1001,11 +1007,17 @@ TEST_CASE("Outer brim loops of an isolated section end on a bar of its own mater
     };
     const Side f = inspect(front.category, bar_front, true);
     const Side b = inspect(back.category, bar_back, false);
-    CAPTURE(spacing, loops, reach, bar_front, bar_back, f.bar_segments, f.beyond_bar, b.bar_segments, b.beyond_bar);
+    CAPTURE(spacing, loops, reach, bar_front, bar_back, f.bar_segments, f.beyond_bar, b.bar_segments, b.beyond_bar,
+            f.first_bar, f.first_outer_loop, b.first_bar, b.first_outer_loop);
     CHECK(f.bar_segments >= 2); // left and right
     CHECK(b.bar_segments >= 2);
     CHECK(f.beyond_bar == 0);
     CHECK(b.beyond_bar == 0);
+    // The bars are drawn before the outer loops, so each loop starts and ends on its bar like on a wall.
+    REQUIRE(f.first_outer_loop != SIZE_MAX);
+    REQUIRE(b.first_outer_loop != SIZE_MAX);
+    CHECK(f.first_bar < f.first_outer_loop);
+    CHECK(b.first_bar < b.first_outer_loop);
 }
 
 TEST_CASE("Isolated section brim chamfer follows the flag, per section", "[PrimeTowerIsolation]")
