@@ -6350,7 +6350,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Give each filament adhesiveness category its own walled section of the prime tower, "
                      "printed only by filaments of that category, so dissimilar materials never stack. "
                      "Adds a toolchange on layers that would otherwise not use a material. "
-                     "Forces rectangle walls and prints the brim on the first layer only.");
+                     "Prints the brim on the first layer only. Rib walls brace the front and back sections; cone walls are printed as rectangle walls.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 

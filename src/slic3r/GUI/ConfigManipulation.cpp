@@ -905,17 +905,15 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     
     toggle_field("prime_tower_width", have_prime_tower && wipe_tower_wall_type != WipeTowerWallType::wtwRib);
 
-    // Material isolation: each section prints its own rectangular wall, so the wall type, framework
-    // and rib/cone fields are fixed and the width is always editable. The interface features act on
-    // contact layers that no longer occur, so they are inert with isolation on.
+    // Material isolation: each section prints its own wall (rectangle or rib; cone falls back to
+    // rectangle, so its angle is inert) and the framework depth copy does not apply. The interface
+    // features act on contact layers that no longer occur, so they are inert with isolation on.
     bool isolate_materials = config->opt_bool("prime_tower_isolate_materials");
     toggle_line("prime_tower_isolate_materials", have_prime_tower && !is_BBL_Printer);
     toggle_line("prime_tower_min_section_depth", have_prime_tower && !is_BBL_Printer && isolate_materials);
-    for (auto el : {"wipe_tower_wall_type", "prime_tower_enable_framework",
-                    "wipe_tower_extra_rib_length", "wipe_tower_rib_width", "wipe_tower_cone_angle"})
+    for (auto el : {"prime_tower_enable_framework", "wipe_tower_cone_angle"})
         toggle_field(el, !isolate_materials);
     if (isolate_materials) {
-        toggle_field("prime_tower_width", have_prime_tower);
         toggle_line("enable_tower_interface_features", false);
         toggle_line("enable_tower_interface_cooldown_during_tower", false);
     }

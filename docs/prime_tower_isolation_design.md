@@ -61,8 +61,9 @@ New print settings in the Prime Tower group:
 Tooltip for `prime_tower_isolate_materials`: "Give each filament
 adhesiveness category its own walled section of the prime tower, printed
 only by filaments of that category, so dissimilar materials never stack.
-Adds a toolchange on layers that would otherwise not use a material. Forces
-rectangle walls and prints the brim on the first layer only."
+Adds a toolchange on layers that would otherwise not use a material. Prints
+the brim on the first layer only. Rib walls brace the front and back
+sections; cone walls are printed as rectangle walls."
 
 Tooltip for `prime_tower_min_section_depth`: "Minimum depth of each
 material section when materials are isolated. Prevents lightly used
@@ -72,13 +73,16 @@ Behaviour when `prime_tower_isolate_materials` is on:
 
 - Materials are grouped by the existing per-filament
   `filament_adhesiveness_category`. No new per-filament setting.
-- `wipe_tower_wall_type` is treated as rectangle regardless of its value.
+- `wipe_tower_wall_type`: rectangle and rib walls are drawn per section
+  (section 3). Cone walls fall back to rectangle with a `validate()` warning,
+  because the cone skirt is printed on every layer by that layer's tool and
+  would stack categories like the shared wall did.
   `prime_tower_enable_framework` (internal ribs) is ignored: isolation uses
   its own depth rule (section 3) instead, because the internal-ribs code
   copies first-layer depths to every layer and would extend a section to the
   top of the print after its material stops being used. `ConfigManipulation`
-  greys out both controls, and the U1 tower interface controls, while
-  isolation is on.
+  greys out the framework and cone-angle controls, and the U1 tower
+  interface controls, while isolation is on.
 - `wipe_tower_filament`, if set, is still inserted into every tower layer
   but no longer prints a wall. Its tooltip gains a sentence saying so.
 - The option is hidden for Bambu printers, like `wipe_tower_no_sparse_layers`.
@@ -133,14 +137,26 @@ more toolchange to return. Accepted for the U1.
   there was a toolchange, otherwise the inserted representative. The
   fallbacks to the wall filament / currently loaded filament are removed in
   this mode. Section 2 guarantees presence; an assert guards it.
-- **Section depth.** On each layer a section is as deep as its purges on
-  that layer and above need (never growing upwards, like the stock tower),
-  at least the minimum section depth, and it ends on the first layer where
-  its category is no longer active. So a section shrinks once a heavily
-  used spool of its category stops, instead of carrying its largest depth
-  to the top. The footprint and the start of every section come from the
-  largest depths, so a shrinking section never moves its neighbours. This
-  replaces the internal-ribs behaviour in isolation mode.
+- **Section depth.** With rectangle walls, on each layer a section is as
+  deep as its purges on that layer and above need (never growing upwards,
+  like the stock tower), at least the minimum section depth, and it ends on
+  the first layer where its category is no longer active. So a section
+  shrinks once a heavily used spool of its category stops, instead of
+  carrying its largest depth to the top. With rib walls every section keeps
+  its largest depth while active, because the fins brace it at fixed
+  corners (the stock rib tower keeps its full footprint too). The footprint
+  and the start of every section come from the largest depths, so a
+  shrinking section never moves its neighbours. This replaces the
+  internal-ribs behaviour in isolation mode.
+- **Rib walls.** The stock rib outline is the footprint rectangle plus a
+  fin at each corner along the tower's diagonals, shrinking with height. Per
+  section, the outline is that rib outline clipped to the section's band:
+  the front section prints its rectangle plus the two front fins, the back
+  section its rectangle plus the two back fins, each as one loop in its own
+  material; middle sections (three or more categories) are plain
+  rectangles. Fillet rounding applies to the fins as in the stock tower.
+  The rib planning branch squares the footprint including the section
+  spacing, and the first-layer rib offset comes from the brim pass outline.
 - **Contact and solid layers.** The dissimilar-interface logic (Contact,
   Contact_UP, Solid) is skipped, since nothing dissimilar stacks.
 - **First layer and brim.** Usual first-layer rules, one brim around the

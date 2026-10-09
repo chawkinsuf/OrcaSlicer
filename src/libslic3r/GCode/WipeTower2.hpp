@@ -498,7 +498,9 @@ private:
 
     // Material isolation (WipeTowerIsolation.cpp).
     void isolation_plan_wall_type();
+    float isolation_extra_depth() const;
     void isolation_layout_blocks();
+    void isolation_set_rib_offset(const Polygon& outer_wall);
     std::vector<WipeTower::ToolChangeResult> isolation_finish_sparse_sections(bool extrude_fill);
     int isolation_finish_filament(const WipeTowerBlock& block, const WipeTowerInfo& layer, int candidate, int fallback);
     Polylines isolation_section_wall(const WipeTowerBlock& block, WipeTower::box_coordinates& wall_box);

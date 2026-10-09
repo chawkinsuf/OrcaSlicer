@@ -598,6 +598,8 @@ TEST_CASE("Isolated section walls keep a clear gap when the section depth is not
     add_gap_objects(model);
     DynamicPrintConfig config = two_material_config(true);
     config.set("prime_tower_min_section_depth", 20.3); // above the purge-driven depth, not a multiple of the 0.5 mm line width
+    SECTION("rectangle walls") { config.set_deserialize_strict("wipe_tower_wall_type", "rectangle"); }
+    SECTION("rib walls") { config.set_deserialize_strict("wipe_tower_wall_type", "rib"); }
     Print print;
     print.set_status_silent();
     print.apply(model, config);
@@ -685,9 +687,12 @@ TEST_CASE("Isolated tower never starts a pass outside its brim", "[PrimeTowerIso
     // fill depth, which put a travel well past the brim whenever that section was not the first.
     Model model;
     add_gap_objects(model);
+    DynamicPrintConfig config = two_material_config(true);
+    SECTION("rectangle walls") { config.set_deserialize_strict("wipe_tower_wall_type", "rectangle"); }
+    SECTION("rib walls: the box includes the fins") { config.set_deserialize_strict("wipe_tower_wall_type", "rib"); }
     Print print;
     print.set_status_silent();
-    print.apply(model, two_material_config(true));
+    print.apply(model, config);
     print.process();
     const WipeTowerData& data = print.wipe_tower_data();
     REQUIRE(!data.tool_changes.empty());
@@ -943,22 +948,23 @@ TEST_CASE("Stock tower honours the brim chamfer flag", "[PrimeTowerIsolation]")
         CHECK(upper_brim == 0);
 }
 
-TEST_CASE("Isolated section shrinks once a spool of its category is no longer used", "[PrimeTowerIsolation]")
+namespace {
+// Three filaments: 0 = PLA-A (100) 4 mm cube, 1 = PLA-B (100) 1 mm cube, 2 = PETG (300) 4 mm
+// cube. While PLA-B prints, the PLA section takes two purges per layer; above 1 mm only one.
+static DynamicPrintConfig three_filament_config(bool isolate)
 {
-    // Three filaments: 0 = PLA-A (100) 4 mm cube, 1 = PLA-B (100) 1 mm cube, 2 = PETG (300) 4 mm
-    // cube. While PLA-B prints, the PLA section takes two purges per layer; above 1 mm only one.
-    // The section follows that demand like the stock tower does (never growing upwards), floored
-    // at the minimum section depth, instead of keeping its largest depth to the top. The section
-    // start and the other section stay where they are.
-    DynamicPrintConfig config = two_material_config(true);
+    DynamicPrintConfig config = two_material_config(isolate);
     config.set_num_extruders(3);
     config.set_num_filaments(3);
     config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75, 1.75};
     config.option<ConfigOptionStrings>("filament_colour")->values = {"#FF0000", "#00FF00", "#0000FF"};
     config.option<ConfigOptionInts>("filament_adhesiveness_category")->values = {100, 100, 300};
     config.set("prime_tower_min_section_depth", 1.);
+    return config;
+}
 
-    Model model;
+static void add_three_filament_objects(Model& model)
+{
     const double heights[] = {4., 1., 4.};
     for (int extruder = 1; extruder <= 3; ++extruder) {
         ModelObject* obj = model.add_object();
@@ -967,6 +973,49 @@ TEST_CASE("Isolated section shrinks once a spool of its category is no longer us
         obj->config.set("extruder", extruder);
         obj->instances.front()->set_offset(Vec3d(40. + 30. * extruder, 50., 0.));
     }
+}
+
+struct Span { float bottom, top; };
+
+// Wall lines of a category on a layer: horizontal segments touching one of the tower's x edges
+// (purge and fill lines are inset by at least a line width; the entry gap can shorten a wall
+// line at one end) and not reaching past them (brim loops and rib fins do). horizontal_wall_ys()
+// is not used because it drops lines inside the section's largest extent, which is where a
+// shrunken top wall lies. Returns the y span of those lines, or nothing if the category has none.
+static std::optional<Span> wall_span(const std::vector<WallSegment>& segs, const Print& print, float width, int category)
+{
+    std::vector<float> ys;
+    for (const WallSegment& s : segs) {
+        const float x0 = std::min(s.a.x(), s.b.x()), x1 = std::max(s.a.x(), s.b.x());
+        if (category_of(print, s.tool) == category && std::abs(s.a.y() - s.b.y()) < 0.01f && x1 - x0 > 5.f &&
+            x0 > -0.1f && x1 < width + 0.1f && (x0 < 0.05f || x1 > width - 0.05f))
+            ys.push_back(s.a.y());
+    }
+    if (ys.empty())
+        return std::nullopt;
+    return Span{*std::min_element(ys.begin(), ys.end()), *std::max_element(ys.begin(), ys.end())};
+}
+
+// Tower width as laid out: rib walls square the footprint, so take it from the widest wall line.
+static float laid_out_width(const std::vector<std::vector<WallSegment>>& layers)
+{
+    float w = 0.f;
+    for (const auto& segs : layers)
+        for (const WallSegment& s : segs)
+            if (std::abs(s.a.y() - s.b.y()) < 0.01f)
+                w = std::max(w, std::max(s.a.x(), s.b.x()));
+    return w;
+}
+} // namespace
+
+TEST_CASE("Isolated section shrinks once a spool of its category is no longer used", "[PrimeTowerIsolation]")
+{
+    // The section follows the purge demand like the stock tower does (never growing upwards),
+    // floored at the minimum section depth, instead of keeping its largest depth to the top. The
+    // section start and the other section stay where they are.
+    DynamicPrintConfig config = three_filament_config(true);
+    Model model;
+    add_three_filament_objects(model);
     Print print;
     print.set_status_silent();
     print.apply(model, config);
@@ -976,30 +1025,9 @@ TEST_CASE("Isolated section shrinks once a spool of its category is no longer us
     const float pw = tower_line_width(print);
     const auto layers = segments_per_layer(data);
     REQUIRE(layers.size() > 8);
+    const float width = laid_out_width(layers);
+    auto span = [&](size_t li, int category) { return wall_span(layers[li], print, width, category); };
 
-    // Wall lines of a category: horizontal segments touching one of the tower's x edges (purge and
-    // fill lines are inset by at least a line width; the entry gap can shorten a wall line at one
-    // end) and not reaching past them (brim loops do). horizontal_wall_ys() is not used here
-    // because it drops lines inside the section's largest extent, which is where a shrunken top
-    // wall lies.
-    const float width = float(print.config().prime_tower_width.value);
-    auto wall_ys = [&](const std::vector<WallSegment>& segs, int category) {
-        std::vector<float> ys;
-        for (const WallSegment& s : segs) {
-            const float x0 = std::min(s.a.x(), s.b.x()), x1 = std::max(s.a.x(), s.b.x());
-            if (category_of(print, s.tool) == category && std::abs(s.a.y() - s.b.y()) < 0.01f && x1 - x0 > 5.f &&
-                x0 > -0.1f && x1 < width + 0.1f && (x0 < 0.05f || x1 > width - 0.05f))
-                ys.push_back(s.a.y());
-        }
-        return ys;
-    };
-    struct Span { float bottom, top; };
-    auto span = [&](size_t li, int category) -> std::optional<Span> {
-        const std::vector<float> ys = wall_ys(layers[li], category);
-        if (ys.empty())
-            return std::nullopt;
-        return Span{*std::min_element(ys.begin(), ys.end()), *std::max_element(ys.begin(), ys.end())};
-    };
     // Layer 1 (both PLA spools in use) against the last layer with both sections active.
     const auto low_pla  = span(1, 100);
     const auto low_petg = span(1, 300);
@@ -1031,4 +1059,130 @@ TEST_CASE("Isolated section shrinks once a spool of its category is no longer us
     CHECK_THAT(double(pla.y_end), WithinAbs(double(pla_top_max), 0.05));
     CHECK_THAT(double(petg.y_start), WithinAbs(double(low_petg->bottom + pw), 0.05));
     CHECK_THAT(double(petg.y_end), WithinAbs(double(petg_top_max), 0.05));
+}
+
+TEST_CASE("Rib walls keep isolated sections at full depth", "[PrimeTowerIsolation]")
+{
+    // Rib fins brace a section at its corners, so with rib walls a section keeps its largest
+    // depth on every layer where its category is active (the stock rib tower keeps its full
+    // footprint too), and only rectangle walls taper.
+    DynamicPrintConfig config = three_filament_config(true);
+    config.set_deserialize_strict("wipe_tower_wall_type", "rib");
+    Model model;
+    add_three_filament_objects(model);
+    Print print;
+    print.set_status_silent();
+    print.apply(model, config);
+    print.process();
+    const WipeTowerData& data = print.wipe_tower_data();
+    REQUIRE(data.sections.size() == 2);
+    const auto layers = segments_per_layer(data);
+    REQUIRE(layers.size() > 8);
+    const WipeTower2::Section& pla = section_for(data, 100);
+    // With fins the top wall line stops short of the tower's x edges, so wall_span() does not
+    // apply; the section's top on a layer is simply the highest long horizontal line of its
+    // category (fins are diagonal, and above layer 0 nothing is printed past the footprint).
+    size_t checked = 0;
+    for (size_t li = 1; li < layers.size(); ++li) {
+        float top = std::numeric_limits<float>::lowest();
+        for (const WallSegment& seg : layers[li])
+            if (category_of(print, seg.tool) == 100 && std::abs(seg.a.y() - seg.b.y()) < 0.01f && std::abs(seg.a.x() - seg.b.x()) > 5.f)
+                top = std::max(top, seg.a.y());
+        if (top == std::numeric_limits<float>::lowest())
+            continue;
+        ++checked;
+        CAPTURE(li, top, pla.y_start, pla.y_end);
+        CHECK_THAT(double(top), WithinAbs(double(pla.y_end), 0.05));
+    }
+    CHECK(checked > 8);
+}
+
+namespace {
+// Extrusions of every layer above the first that lie beyond the footprint in y: under isolation
+// nothing shared is printed there, so these are rib fins (or nothing).
+struct FinCount { size_t front = 0, back = 0, front_wrong_category = 0, back_wrong_category = 0, layers_with_fins = 0; };
+static FinCount count_fins(const Print& print, const WipeTowerData& data)
+{
+    const float pw = tower_line_width(print);
+    const WipeTower2::Section* front = &data.sections.front();
+    const WipeTower2::Section* back  = &data.sections.front();
+    for (const auto& s : data.sections) {
+        if (s.y_start < front->y_start) front = &s;
+        if (s.y_end > back->y_end) back = &s;
+    }
+    FinCount out;
+    for (size_t li = 1; li < data.tool_changes.size(); ++li) {
+        bool any = false;
+        for (const auto& tcr : data.tool_changes[li]) {
+            for (const auto& e : tcr.extrusions) {
+                if (e.width <= 0.f)
+                    continue;
+                const int category = category_of(print, e.tool);
+                if (e.pos.y() < front->y_start - pw - 0.05f) {
+                    ++out.front; any = true;
+                    if (category != front->category) ++out.front_wrong_category;
+                } else if (e.pos.y() > back->y_end + 0.05f) {
+                    ++out.back; any = true;
+                    if (category != back->category) ++out.back_wrong_category;
+                }
+            }
+        }
+        if (any) ++out.layers_with_fins;
+    }
+    return out;
+}
+} // namespace
+
+TEST_CASE("Isolated rib tower gives the front and back sections fins in their own material", "[PrimeTowerIsolation]")
+{
+    // The rib outline is the footprint rectangle plus a fin at each corner. Under isolation the
+    // front section owns the two front corners and the back section the two back corners, and
+    // each prints its fins as part of its own wall loop. Nothing else is printed beyond the
+    // footprint above the first layer.
+    Model model;
+    add_gap_objects(model);
+    DynamicPrintConfig config = two_material_config(true);
+    config.set_deserialize_strict("wipe_tower_wall_type", "rib");
+    Print print;
+    print.set_status_silent();
+    print.apply(model, config);
+    print.process();
+    const WipeTowerData& data = print.wipe_tower_data();
+    REQUIRE(data.sections.size() == 2);
+    REQUIRE(data.tool_changes.size() > 4);
+    const FinCount fins = count_fins(print, data);
+    CAPTURE(fins.front, fins.back, fins.front_wrong_category, fins.back_wrong_category, fins.layers_with_fins, data.tool_changes.size());
+    CHECK(fins.front > 0);
+    CHECK(fins.back > 0);
+    CHECK(fins.front_wrong_category == 0);
+    CHECK(fins.back_wrong_category == 0);
+    // Fins shrink with height and vanish at the top, so expect them on at least the lower half.
+    CHECK(fins.layers_with_fins >= (data.tool_changes.size() - 1) / 2);
+}
+
+TEST_CASE("Cone walls fall back to rectangle walls under isolation with a warning", "[PrimeTowerIsolation]")
+{
+    // The cone is a skirt printed on every layer by that layer's tool, so it would stack
+    // categories like the shared wall did. There is no per-section equivalent, so it is not
+    // printed; validate() says so.
+    Model model;
+    add_gap_objects(model);
+    DynamicPrintConfig config = two_material_config(true);
+    config.set_deserialize_strict("wipe_tower_wall_type", "cone");
+    Print print;
+    print.set_status_silent();
+    print.apply(model, config);
+    StringObjectException warning;
+    const StringObjectException err = print.validate(&warning);
+    CAPTURE(err.string, warning.string);
+    CHECK(err.string.empty());
+    CHECK(warning.string.find("one") != std::string::npos); // "Cone"/"cone"
+    CHECK(warning.opt_key == "wipe_tower_wall_type");
+    print.process();
+    const WipeTowerData& data = print.wipe_tower_data();
+    REQUIRE(data.sections.size() == 2);
+    const FinCount fins = count_fins(print, data);
+    CAPTURE(fins.front, fins.back);
+    CHECK(fins.front == 0);
+    CHECK(fins.back == 0);
 }

@@ -2831,8 +2831,6 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer_new(bool extrude_perimeter,
         extrude_perimeter = false;
         extrude_fill      = false;
         extrude_fill_wall = false;
-        if (is_first_layer())
-            m_rib_offset = Vec2f(0.f, 0.f); // rectangle walls start at the tower origin
     }
 
     WipeTowerWriter2 writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_enable_arc_fitting, m_printer_model);
@@ -2983,6 +2981,8 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer_new(bool extrude_perimeter,
         shift_polyline.translate(0, scaled(m_y_shift));
         m_outer_wall[m_z_pos].push_back(shift_polyline);
     }
+    if (isolation_active() && is_first_layer())
+        isolation_set_rib_offset(outer_wall);
 
     // How many perimeters shall the brim have?
     int loops_num = (m_wipe_tower_brim_width + spacing / 2.f) / spacing;
@@ -3183,13 +3183,14 @@ void WipeTower2::plan_local_z_reserve(float z_par, float layer_height_par, size_
 void WipeTower2::plan_tower_new()
 {
     if (m_isolate_materials)
-        isolation_plan_wall_type(); // material isolation forces rectangle walls (WipeTowerIsolation.cpp)
+        isolation_plan_wall_type(); // material isolation: cone falls back to rectangle, no framework (WipeTowerIsolation.cpp)
 
     if (m_use_rib_wall) {
         // recalculate wipe_tower_with and layer's depth
         generate_wipe_tower_blocks(false);
         float max_depth = std::accumulate(m_wipe_tower_blocks.begin(), m_wipe_tower_blocks.end(), 0.f,
             [](float a, const auto& t) { return a + t.depth; }) + m_perimeter_width;
+        max_depth += isolation_extra_depth(); // material isolation: spacing between sections
         float square_width = align_ceil(std::sqrt(std::fabs(max_depth * m_wipe_tower_width)), m_perimeter_width);
         m_wipe_tower_width = square_width;
 

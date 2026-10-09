@@ -1784,6 +1784,9 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
             if (categories.size() < 2) {
                 warning->string  = L("Isolate materials in prime tower has no effect: all filaments in use share the same adhesiveness category.");
                 warning->opt_key = "prime_tower_isolate_materials";
+            } else if (m_config.wipe_tower_wall_type == WipeTowerWallType::wtwCone) {
+                warning->string  = L("Cone prime tower walls are not supported with isolated materials; rectangle walls are used instead.");
+                warning->opt_key = "wipe_tower_wall_type";
             }
         }
 
