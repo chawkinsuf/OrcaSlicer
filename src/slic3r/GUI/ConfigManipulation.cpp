@@ -922,8 +922,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     toggle_line("wipe_tower_wall_gap", have_prime_tower);
     toggle_line("prime_tower_enable_framework", have_prime_tower);
-    toggle_line("prime_tower_brim_chamfer_max_width", have_prime_tower);
-    toggle_line("prime_tower_brim_chamfer", have_prime_tower);
+    // Material isolation prints the brim on the first layer only, so the chamfer is off.
+    toggle_line("prime_tower_brim_chamfer_max_width", have_prime_tower && !isolate_materials);
+    toggle_line("prime_tower_brim_chamfer", have_prime_tower && !isolate_materials);
 
     toggle_line("single_extruder_multi_material_priming", !bSEMM && have_prime_tower && !is_BBL_Printer);
 

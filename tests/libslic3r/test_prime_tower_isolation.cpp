@@ -854,3 +854,90 @@ TEST_CASE("Two spools of one category purge exactly as they do without isolation
     CHECK(pla_to_pla > 0);
     CHECK(print_on.wipe_tower_data().sections.size() == 2);
 }
+
+TEST_CASE("Isolated tower prints its brim on the first layer only", "[PrimeTowerIsolation]")
+{
+    // The stock tower tapers the brim into the wall over the next few layers (brim chamfer),
+    // printed by whichever tool finishes the layer. Under isolation that tool can belong to a
+    // different category than the first-layer brim, which stacks PETG on a PLA brim: the very
+    // thing isolation exists to avoid. So the chamfer is forced off and nothing is extruded
+    // outside the footprint above the first layer, whatever prime_tower_brim_chamfer says.
+    Model model;
+    add_gap_objects(model);
+    DynamicPrintConfig config = two_material_config(true);
+    SECTION("chamfer flag on") { config.set("prime_tower_brim_chamfer", true); }
+    SECTION("chamfer flag off") { config.set("prime_tower_brim_chamfer", false); }
+    Print print;
+    print.set_status_silent();
+    print.apply(model, config);
+    print.process();
+    const WipeTowerData& data = print.wipe_tower_data();
+    REQUIRE(data.tool_changes.size() > 2);
+    const float pw = tower_line_width(print);
+    float footprint_min = data.sections.front().y_start, footprint_max = data.sections.front().y_end;
+    for (const auto& s : data.sections) {
+        footprint_min = std::min(footprint_min, s.y_start);
+        footprint_max = std::max(footprint_max, s.y_end);
+    }
+    // The first section's bottom wall sits one line below the footprint; anything farther out is brim.
+    auto outside = [&](float y) { return y < footprint_min - pw - 0.05f || y > footprint_max + 0.05f; };
+
+    size_t first_layer_brim = 0, upper_brim = 0;
+    for (size_t li = 0; li < data.tool_changes.size(); ++li) {
+        for (const WipeTower::ToolChangeResult& tcr : data.tool_changes[li]) {
+            for (const WipeTower::Extrusion& e : tcr.extrusions) {
+                if (e.width <= 0.f || !outside(e.pos.y()))
+                    continue;
+                if (li == 0) {
+                    ++first_layer_brim;
+                } else {
+                    CAPTURE(li, tcr.print_z, e.tool, e.pos.y(), footprint_min, footprint_max);
+                    ++upper_brim;
+                }
+            }
+        }
+    }
+    CHECK(first_layer_brim > 0);
+    CHECK(upper_brim == 0);
+}
+
+TEST_CASE("Stock tower honours the brim chamfer flag", "[PrimeTowerIsolation]")
+{
+    // prime_tower_brim_chamfer (developer mode) was honoured by the old tower and dropped by the
+    // block tower path; isolation forcing it off brings it back. The stock tower keeps its full
+    // depth on every layer with two categories, so its own extent is the same above layer 0 and
+    // anything beyond that extent plus a line of fillet tolerance is brim or chamfer.
+    Model model;
+    add_gap_objects(model);
+    DynamicPrintConfig config = two_material_config(false);
+    config.set_deserialize_strict("wipe_tower_wall_type", "rectangle");
+    bool chamfer = true;
+    SECTION("flag on: chamfer loops above the first layer") { chamfer = true; }
+    SECTION("flag off: brim on the first layer only") { chamfer = false; }
+    config.set("prime_tower_brim_chamfer", chamfer);
+    Print print;
+    print.set_status_silent();
+    print.apply(model, config);
+    print.process();
+    const WipeTowerData& data = print.wipe_tower_data();
+    REQUIRE(data.tool_changes.size() > 6);
+    // Tower extent: the y span of the top tower layer, which never carries brim or chamfer.
+    float y_min = std::numeric_limits<float>::max(), y_max = std::numeric_limits<float>::lowest();
+    for (const auto& tcr : data.tool_changes.back())
+        for (const auto& e : tcr.extrusions)
+            if (e.width > 0.f) { y_min = std::min(y_min, e.pos.y()); y_max = std::max(y_max, e.pos.y()); }
+    REQUIRE(y_min < y_max);
+    auto outside = [&](float y) { return y < y_min - 0.05f || y > y_max + 0.05f; };
+    size_t first_layer_brim = 0, upper_brim = 0;
+    for (size_t li = 0; li + 1 < data.tool_changes.size(); ++li)
+        for (const auto& tcr : data.tool_changes[li])
+            for (const auto& e : tcr.extrusions)
+                if (e.width > 0.f && outside(e.pos.y()))
+                    (li == 0 ? first_layer_brim : upper_brim)++;
+    CAPTURE(chamfer, y_min, y_max, first_layer_brim, upper_brim);
+    CHECK(first_layer_brim > 0);
+    if (chamfer)
+        CHECK(upper_brim > 0);
+    else
+        CHECK(upper_brim == 0);
+}

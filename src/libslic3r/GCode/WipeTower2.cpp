@@ -2988,8 +2988,14 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer_new(bool extrude_perimeter,
     int loops_num = (m_wipe_tower_brim_width + spacing / 2.f) / spacing;
     const float max_chamfer_width = 3.f;
     if (!first_layer) {
+        if (!m_prime_tower_brim_chamfer || isolation_active()) {
+            // Brim chamfer disabled, or material isolation: the chamfer would be printed by
+            // whichever tool finishes this layer, on top of a first-layer brim that may be
+            // another category. Brim on the first layer only.
+            loops_num = 0;
+        }
         // stop print chamfer if depth changes
-        if (m_layer_info->depth != m_plan.front().depth) {
+        else if (m_layer_info->depth != m_plan.front().depth) {
             loops_num = 0;
         }
         else {

@@ -62,7 +62,8 @@ Tooltip for `prime_tower_isolate_materials`: "Give each filament
 adhesiveness category its own walled section of the prime tower, printed
 only by filaments of that category, so dissimilar materials never stack.
 Adds a toolchange on layers that would otherwise not use a material. Forces
-rectangle walls; sections keep full depth without tapering."
+rectangle walls and prints the brim on the first layer only; sections keep
+full depth without tapering."
 
 Tooltip for `prime_tower_min_section_depth`: "Minimum depth of each
 material section when materials are isolated. Prevents lightly used
@@ -139,8 +140,14 @@ more toolchange to return. Accepted for the U1.
   internal-ribs behaviour in isolation mode.
 - **Contact and solid layers.** The dissimilar-interface logic (Contact,
   Contact_UP, Solid) is skipped, since nothing dissimilar stacks.
-- **First layer and brim.** Unchanged: usual first-layer rules, one brim
-  around the whole footprint.
+- **First layer and brim.** Usual first-layer rules, one brim around the
+  whole footprint. The brim chamfer (the stock tower tapers the brim into
+  the wall over the next few layers) is forced off: it is printed by
+  whichever tool finishes the layer, which under isolation may be a
+  different category than the brim below it. The existing
+  `prime_tower_brim_chamfer` flag (developer mode, hidden from the tab on
+  main) is honoured by the block tower path again at the same time; the sync
+  that introduced that path had dropped it.
 - **Final purge, local-Z and nozzle-change paths** keep working: they
   already target a block by category.
 
