@@ -1,30 +1,46 @@
 # Prime Tower Material Isolation — Design
 
-Date: 2026-10-07
-Status: approved design, phase 1
+Date: 2026-10-07, revised 2026-10-09
+Status: implemented on `feature/prime-tower-isolation`
 Target: Snapmaker Orca (Snapmaker U1, independent toolheads)
 
-## Problem
+## Context: the next step after the block tower
 
-Multi-material prints that pair a model material with a support material
-that is meant *not* to bond to it (for example PLA model, PETG support)
-fail at the prime tower. The tower stacks both materials in the same
-column, the weak PLA/PETG interfaces delaminate, and loose purge lines are
-dragged into the print.
+The tower that shipped in 2.4.0 had no notion of materials: every purge,
+wall and brim loop stacked in whatever order the toolchanges came. The sync
+from Snapmaker's internal tree on 2026-09-30 (#937, after the v2.4.0 tag)
+replaced it with the **block tower**: `WipeTower2` divides the footprint
+into one Y-band ("block") per `filament_adhesiveness_category`, each
+toolchange purges into its own category's band, and where categories still
+meet it adds Contact and Solid interface layers, plus the U1 "tower
+interface features" (an interface temperature boost with optional
+pre-extrusion and cooldown) to make that bond as strong as it can be.
 
-Snapmaker Orca's `WipeTower2` already divides the tower into one Y-band
-("block") per `filament_adhesiveness_category`, and each toolchange purges
-into its own category's band. Isolation still fails because:
+That tower separates the purges but not the tower. Four things still put
+one category on top of another:
 
-1. One shared outer wall wraps all bands and is printed by whichever
-   filament changes first on the layer (or the fixed wipe tower filament),
-   so the wall alternates materials layer to layer.
-2. A band's sparse fill on a layer with no toolchange onto it falls back to
-   the wall filament or the currently loaded filament, so the wrong material
-   is laid on top of the band.
+1. **The shared outer wall**, printed every layer by whichever filament
+   changes first on that layer (or the fixed wipe tower filament), so the
+   wall alternates materials layer to layer.
+2. **A band whose category is absent on a layer** is still printed, by the
+   filament that last purged into it or by the layer's wall filament, so
+   the wrong material is laid over it.
+3. **Sparse layers** with no toolchange at all: the one loaded filament
+   prints the outer wall and the fill of every band.
+4. **The brim chamfer**, the loops that taper the brim into the wall over
+   the first few layers, printed by whichever tool finishes each layer on
+   top of a first-layer brim of another material.
 
-The existing Contact/Solid layer logic and the U1 "tower interface
-features" mitigate the dissimilar interface instead of removing it.
+The interface layers are a mitigation, not a cure: for pairs that barely
+bond, PLA and PETG above all, they still fail, and a failed tower drags
+loose purge lines into the print. This feature is the next step in the
+direction the block tower took: an opt-in mode that closes all four sites,
+so **nothing is shared between categories, not even the brim**, at the
+cost of one extra toolchange on each layer where a category would
+otherwise be absent. The block tower spends zero extra toolchanges and
+trusts the interface layers; this mode spends the toolchange and removes
+the interface. Which one a user wants depends on whether their material
+pair bonds at all.
 
 Prior art: OrcaSlicer issue #8474 "Separate prime towers for multi material
 prints"; the `wipe_tower_filament` setting (single-material wall) is the
@@ -32,22 +48,28 @@ usual workaround.
 
 ## Goal
 
-An opt-in mode in which each adhesiveness category owns a walled section of
-the existing tower footprint and that section is only ever printed by
-filaments of its own category, so dissimilar materials never stack
-vertically. The user accepts extra toolchanges on layers that would not
-otherwise use a material.
+Each adhesiveness category owns a walled section of the existing tower
+footprint, with its own brim, and that section is only ever printed by
+filaments of its own category. Dissimilar materials never touch vertically.
+The user accepts extra toolchanges on layers that would not otherwise use a
+material.
 
-## Non-goals (phase 1)
+## Non-goals
 
 - Separately placed towers (new placement UI, model/3MF changes).
 - Circular or spiral tower geometry.
-- Per-section rib or cone walls.
+- Cone walls per section (see section 1: cone falls back to rectangle).
 - Single-nozzle (ramming) printers. The design does not break them, but it
   is only validated for independent toolheads.
 - Bambu printers (they use the other `WipeTower` implementation).
 
 ## Design
+
+All isolation-specific bodies live in
+`src/libslic3r/GCode/WipeTowerIsolation.cpp`; the call sites in
+`WipeTower2.cpp` and `ToolOrdering.cpp` are a few lines each, so the
+feature stays easy to carry across upstream changes to those files (the
+block tower itself arrived as one large sync, and more are likely).
 
 ### 1. Settings and UI
 
@@ -72,17 +94,24 @@ materials from producing a thin, unstable column."
 Behaviour when `prime_tower_isolate_materials` is on:
 
 - Materials are grouped by the existing per-filament
-  `filament_adhesiveness_category`. No new per-filament setting.
+  `filament_adhesiveness_category`. No new per-filament setting. Filaments
+  beyond the end of that list count as category 0.
 - `wipe_tower_wall_type`: rectangle and rib walls are drawn per section
-  (section 3). Cone walls fall back to rectangle with a `validate()` warning,
-  because the cone skirt is printed on every layer by that layer's tool and
-  would stack categories like the shared wall did.
-  `prime_tower_enable_framework` (internal ribs) is ignored: isolation uses
+  (section 3). Cone walls fall back to rectangle with a `validate()`
+  warning on the wall type field, because the cone skirt is printed on
+  every layer by that layer's tool and would stack categories like the
+  shared wall did. (With the U1 profiles' 15° apex angle the stock cone only
+  draws its arc on towers roughly four times taller than deep, so the
+  fallback is rarely visible in practice.)
+- `prime_tower_enable_framework` (internal ribs) is ignored: isolation uses
   its own depth rule (section 3) instead, because the internal-ribs code
   copies first-layer depths to every layer and would extend a section to the
-  top of the print after its material stops being used. `ConfigManipulation`
-  greys out the framework and cone-angle controls, and the U1 tower
-  interface controls, while isolation is on.
+  top of the print after its material stops being used.
+- `prime_tower_brim_chamfer` and its max width (developer mode, hidden from
+  the tab on main) are honoured, per section (section 3).
+- `ConfigManipulation` greys out the framework and cone-angle controls and
+  the U1 tower interface controls while isolation is on. The wall type,
+  rib and brim controls stay editable.
 - `wipe_tower_filament`, if set, is still inserted into every tower layer
   but no longer prints a wall. Its tooltip gains a sentence saying so.
 - The option is hidden for Bambu printers, like `wipe_tower_no_sparse_layers`.
@@ -92,23 +121,21 @@ through presets and 3MF project config with no extra work.
 
 ### 2. Tool ordering (`ToolOrdering`)
 
-Generalise `insert_wipe_tower_extruder()`:
+`insert_wipe_tower_extruder()` gains one call, `insert_isolation_extruders()`:
 
-- For each layer with a tower, compute the set of **active categories**: a
-  category is active on a layer if any filament of that category is used on
-  that layer or any layer above it. This matches how block depth already
-  propagates downward, so a section exists exactly where its category is
-  active.
-- For each active category with no filament on the layer, insert a
-  **representative filament**: the filament of that category used on the
-  nearest layer above; fallback, the lowest-index filament of that category
-  used anywhere in the print.
-- Then run the existing reorder and `fill_wipe_tower_partitions` steps, as
-  the current hook does, so inserted toolchanges get volumes, positions and
-  partitions like any other.
-
-Categories come from `filament_adhesiveness_category` in the print config.
-Filaments sharing a category share a section.
+- A category is **active** on a layer if any filament of that category is
+  used on that layer or on any layer above it. This matches how block
+  depth already propagates downward, so a section exists exactly where its
+  category is active.
+- Walk the layers top-down, remembering for each category the filament
+  seen nearest above. On every layer with a tower, each active category
+  with no filament present gets that **representative** inserted, so two
+  spools of one material never ping-pong.
+- The inserted extruders then flow through the existing sort, reorder and
+  `fill_wipe_tower_partitions` steps, so inserted toolchanges get volumes,
+  positions and partitions like any other.
+- Only `WipeTower2` (non-Bambu printers) prints isolated sections, so with a
+  Bambu printer nothing is inserted.
 
 When only one category is active, nothing is inserted and the layer is
 unchanged from today.
@@ -119,10 +146,23 @@ more toolchange to return. Accepted for the U1.
 
 ### 3. Tower geometry (`WipeTower2`)
 
-- **Section depth.** After block depths are computed, clamp each block's
-  per-layer depth to at least `prime_tower_min_section_depth` on every layer
-  where the block is active. Tower depth is the sum of section depths plus
-  gaps.
+`isolation_active()` is true only when the option is on **and** the plan
+has more than one section. With a single category the tower is printed
+exactly as configured (rib walls, framework and all), byte-identical to
+isolation off.
+
+- **Section depth.** With rectangle walls, on each layer a section is as
+  deep as its purges on that layer and above need (never growing upwards,
+  like the stock tower), at least `prime_tower_min_section_depth`, and it
+  ends on the first layer where its category is no longer active. So a
+  section shrinks once a heavily used spool of its category stops, instead
+  of carrying its largest depth to the top. With rib walls every section
+  keeps its largest depth while active, because the fins brace it at fixed
+  corners (the stock rib tower keeps its full footprint too). The footprint
+  and the start of every section come from the largest depths, so a
+  shrinking section never moves its neighbours. Depths are aligned to the
+  line-width grid so `align_perimeter()` leaves the walls where they are
+  laid out. This replaces the internal-ribs behaviour in isolation mode.
 - **Gap.** Adjacent sections are separated by one line width of clear air
   (wall centres two line widths apart), so the two walls never fuse. When
   the tower has a brim the gap is one line wider, so that the innermost brim
@@ -130,58 +170,59 @@ more toolchange to return. Accepted for the U1.
   section (wall centres three line widths apart). Lateral bracing between
   columns is not a design requirement; if real prints show columns need it,
   the gap can become a setting later.
-- **Per-section walls.** `finish_block` already draws a rectangle around
-  the block's remaining area. In isolation mode that rectangle is the
-  section's outer wall, inset by the gap, and the shared outer perimeter in
+- **Per-section walls.** `finish_block` draws the section's own wall where
+  the shared outer wall used to be: same X extent, one line below the
+  section's interior and at its end. The shared outer perimeter in
   `finish_layer_new` is skipped. Purge lines and sparse fill are inset by
-  one more line width so they stay inside the section wall.
-- **Fill filament.** A section's fill on a layer is printed by the filament
-  of its own category present on that layer: the one that purged into it if
-  there was a toolchange, otherwise the inserted representative. The
-  fallbacks to the wall filament / currently loaded filament are removed in
-  this mode. Section 2 guarantees presence; an assert guards it.
-- **Section depth.** With rectangle walls, on each layer a section is as
-  deep as its purges on that layer and above need (never growing upwards,
-  like the stock tower), at least the minimum section depth, and it ends on
-  the first layer where its category is no longer active. So a section
-  shrinks once a heavily used spool of its category stops, instead of
-  carrying its largest depth to the top. With rib walls every section keeps
-  its largest depth while active, because the fins brace it at fixed
-  corners (the stock rib tower keeps its full footprint too). The footprint
-  and the start of every section come from the largest depths, so a
-  shrinking section never moves its neighbours. This replaces the
-  internal-ribs behaviour in isolation mode.
+  one more line width so they stay inside the section wall. The entry gap
+  (`wipe_tower_wall_gap`) is left at this layer's toolchange entry points
+  that lie on the section's side walls, exactly as before.
 - **Rib walls.** The stock rib outline is the footprint rectangle plus a
   fin at each corner along the tower's diagonals, shrinking with height. Per
   section, the outline is that rib outline clipped to the section's band:
   the front section prints its rectangle plus the two front fins, the back
   section its rectangle plus the two back fins, each as one loop in its own
   material; middle sections (three or more categories) are plain
-  rectangles. Fillet rounding applies to the fins as in the stock tower.
-  The rib planning branch squares the footprint including the section
-  spacing, and the first-layer rib offset comes from the brim pass outline.
+  rectangles and get no fins. Fillet rounding applies to the fins as in
+  the stock tower. The rib planning branch squares the footprint including
+  the section spacing, and the first-layer rib offset comes from the
+  whole-tower outline computed in `finish_layer_new`.
+- **Fill filament.** A section's fill on a layer is printed by the filament
+  of its own category present on that layer: the one that purged into it if
+  there was a toolchange, otherwise the inserted representative. The
+  fallbacks to the wall filament / currently loaded filament are removed in
+  this mode. Section 2 guarantees presence; an assert guards it.
+- **Sparse layers** (no toolchange) can only occur while a single category
+  is active; every active section is printed by the current tool.
+- **Brim and chamfer.** The brim is per section: the loops the stock tower
+  draws around the whole footprint (the first-layer brim, then the chamfer
+  that tapers it into the wall over the next few layers when
+  `prime_tower_brim_chamfer` is on) are drawn around each section's outline,
+  fins included, right after its wall and in its material, clipped at the
+  midline of the gap on each side shared with a neighbour. So each column
+  has a brim bonded to its own wall, the chamfer stacks on a brim of the
+  same material, and the shared brim pass in `finish_layer_new` draws
+  nothing. The two innermost brim lines lie side by side in the gap on the
+  first layer (and the chamfer lines for a few layers above); that is
+  lateral contact on lines that are peeled off anyway. The
+  `prime_tower_brim_chamfer` flag is honoured by the block tower path again
+  at the same time; the sync that introduced that path had dropped it.
 - **Contact and solid layers.** The dissimilar-interface logic (Contact,
   Contact_UP, Solid) is skipped, since nothing dissimilar stacks.
-- **First layer and brim.** Usual first-layer rules. The brim is per
-  section: the loops the stock tower draws around the whole footprint (the
-  first-layer brim, then the chamfer that tapers it into the wall over the
-  next few layers when `prime_tower_brim_chamfer` is on) are drawn around
-  each section's outline by that section's material and clipped at the
-  midline of the gap on each side shared with a neighbour. So each column
-  has a brim bonded to its own wall, and the chamfer stacks on a brim of the
-  same material. The shared brim pass in `finish_layer_new` draws nothing.
-  The `prime_tower_brim_chamfer` flag (developer mode, hidden from the tab
-  on main) is honoured by the block tower path again at the same time; the
-  sync that introduced that path had dropped it.
+- **Footprint reporting.** `get_z_and_depth_pairs()` reports the full
+  footprint up to the top of the tower (a front section can end while the
+  back one continues, so a smaller centred box would be misplaced), and
+  `WipeTowerData::sections` carries each section's category and Y range for
+  tests and tooling.
 - **Final purge, local-Z and nozzle-change paths** keep working: they
   already target a block by category.
 
 ### 4. G-code stage, interactions, edge cases
 
-No changes expected in `GCode.cpp` / `WipeTowerIntegration`: each
-toolchange is still one tower-local result translated to the tower
-position; bounding box, detours and stats are unchanged, and inserted
-toolchanges flow through the existing per-layer loop.
+No changes in `GCode.cpp` / `WipeTowerIntegration`: each toolchange is
+still one tower-local result translated to the tower position; bounding
+box, detours and stats are unchanged, and inserted toolchanges flow through
+the existing per-layer loop.
 
 Interactions:
 
@@ -194,53 +235,75 @@ Interactions:
   occur; inert while isolation is on; UI greys them out.
 - Purge into objects/infill: unchanged; it just reduces what lands in the
   section.
-- Wall type / internal ribs: overridden as in section 1.
+- Wall type: rectangle and rib per section; cone falls back to rectangle
+  with a warning; internal ribs ignored (section 1).
+- Brim width and chamfer: per section (section 3). The real brim width is
+  still reported for the skirt and the preview box.
 - Pre-slice tower estimate: the 3D view's estimated tower box
   (`PartPlate::estimate_wipe_tower_size`) does not know about the minimum
   section depth or inserted toolchanges, so it is shallower than the real
   tower until slicing finishes and the real mesh replaces it. Accepted as
-  cosmetic for phase 1.
+  cosmetic.
 
 Edge cases:
 
 - All filaments share one category: tower identical to today; validation
   emits a one-line warning that isolation has no effect.
 - A category stops mid-print: its section ends there, as blocks already
-  do; remaining sections continue; minimum depth still applies.
+  do; remaining sections continue; minimum depth still applies. With rib
+  walls the fins at that end stop with it.
 - A category first appears mid-print: its section starts at the first
   layer (active-category propagation extends downward), filled by the
   representative filament, so no column starts mid-air.
+- Two spools of one category share a section and purge exactly as they do
+  without isolation; sharing changes where a purge lands, not its size.
 - By-object sequential printing: tower already unsupported; nothing new.
 
 ### 5. Testing
 
-Automated (Catch2, test-first), new file
-`tests/libslic3r/test_prime_tower_isolation.cpp`, following the pattern of
-`test_mixed_filament.cpp` (build a `Print` in code, run tool ordering /
-`Print::process`, inspect results):
+Automated (Catch2, written test-first), `tests/libslic3r/test_prime_tower_isolation.cpp`,
+following the pattern of `test_mixed_filament.cpp` (build a `Print` in
+code, run tool ordering / `Print::process`, inspect `WipeTowerData` and the
+exported G-code). Cases on the branch:
 
-- **Tool ordering.** PLA (100) object plus a shorter PETG (300) object.
-  Off: PLA-only layers above the PETG object have one extruder. On: every
-  layer up to the PETG top has both; layers above have PLA only. Two PLA
-  spools: representative choice does not ping-pong. Single category:
-  nothing inserted.
-- **Section geometry.** Run the wipe tower step and inspect
-  `WipeTowerData::tool_changes`: every toolchange/fill onto a section is by
-  a filament of that section's category; each section depth is at least
-  the minimum; tower depth equals sections plus gaps.
-- **G-code emission.** Export G-code; each tower layer contains extrusions
-  from both tools; tower X extents unchanged versus isolation off; output
-  still parses through the G-code processor.
+- **Settings.** Keys exist with the documented defaults and belong to the
+  print preset.
+- **Tool ordering.** The missing category is inserted on single-material
+  layers and not above the category's last use; nothing with one category
+  or a Bambu printer; the spool nearest above is the representative;
+  filaments beyond the category list count as category 0.
+- **Section geometry.** Sections are at least the minimum depth and
+  spaced four line widths with a brim, three without; every extrusion of a
+  category lies in its own section, its own brim, or beyond the footprint;
+  a sparse layer prints only the active section with the current tool;
+  section walls keep a clear gap even when the depth is not a multiple of
+  the line width; the entry gap sits where a toolchange enters; the
+  footprint is reported to the top; no pass starts outside the brim.
+- **Depth rule.** A section shrinks once a spool of its category stops
+  (rectangle walls); rib walls keep it at full depth.
+- **Walls.** Rib fins on the front and back sections in their own
+  material; cone falls back to rectangle with a warning; a single category
+  leaves the tower unchanged (rectangle, and rib with framework).
+- **Brim.** Each section's brim is its own material, with one line of each
+  in the gap; the chamfer follows the flag per section; the stock tower
+  honours the flag again.
+- **Purges and G-code.** Two spools of one category purge exactly as
+  without isolation; G-code export has more toolchanges, unchanged X
+  extents, and every layer with a toolchange has tower extrusion to purge
+  into.
 - **Regression.** Existing mixed-filament and print tests pass with
   isolation off; the off path is untouched.
 
-Manual (user, Snapmaker U1): the PLA-with-PETG-supports model that fails
-today, sliced with isolation on, tower inspected in preview (seam, extra
-toolchanges), then printed. This provides the PR template's screenshots and
-test evidence.
+Manual (Snapmaker U1): the PLA-with-PETG-supports model that fails today,
+sliced with isolation on and off against main's stock tower, tower
+inspected in preview (sections, gap, brim, extra toolchanges in the
+legend), then printed. This provides the PR's screenshots and test
+evidence.
 
-## Future work (not phase 1)
+## Future work
 
-- Per-section rib walls for extra stiffness.
+- Fins or other bracing for middle sections when three or more categories
+  are in use.
 - Let a section skip layers (lag) instead of inserting a toolchange.
+- Expose the gap between sections as a setting if prints call for it.
 - Circular tower with a spiral purge path and concentric material rings.
