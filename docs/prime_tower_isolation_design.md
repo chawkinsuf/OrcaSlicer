@@ -62,8 +62,7 @@ Tooltip for `prime_tower_isolate_materials`: "Give each filament
 adhesiveness category its own walled section of the prime tower, printed
 only by filaments of that category, so dissimilar materials never stack.
 Adds a toolchange on layers that would otherwise not use a material. Forces
-rectangle walls and prints the brim on the first layer only; sections keep
-full depth without tapering."
+rectangle walls and prints the brim on the first layer only."
 
 Tooltip for `prime_tower_min_section_depth`: "Minimum depth of each
 material section when materials are isolated. Prevents lightly used
@@ -75,7 +74,7 @@ Behaviour when `prime_tower_isolate_materials` is on:
   `filament_adhesiveness_category`. No new per-filament setting.
 - `wipe_tower_wall_type` is treated as rectangle regardless of its value.
   `prime_tower_enable_framework` (internal ribs) is ignored: isolation uses
-  its own no-taper rule (section 3) instead, because the internal-ribs code
+  its own depth rule (section 3) instead, because the internal-ribs code
   copies first-layer depths to every layer and would extend a section to the
   top of the print after its material stops being used. `ConfigManipulation`
   greys out both controls, and the U1 tower interface controls, while
@@ -134,10 +133,14 @@ more toolchange to return. Accepted for the U1.
   there was a toolchange, otherwise the inserted representative. The
   fallbacks to the wall filament / currently loaded filament are removed in
   this mode. Section 2 guarantees presence; an assert guards it.
-- **No taper.** A section keeps its maximum depth (over all layers where
-  its category is active) on every active layer, and ends on the first
-  layer where its category is no longer active. This replaces the
-  internal-ribs behaviour in isolation mode.
+- **Section depth.** On each layer a section is as deep as its purges on
+  that layer and above need (never growing upwards, like the stock tower),
+  at least the minimum section depth, and it ends on the first layer where
+  its category is no longer active. So a section shrinks once a heavily
+  used spool of its category stops, instead of carrying its largest depth
+  to the top. The footprint and the start of every section come from the
+  largest depths, so a shrinking section never moves its neighbours. This
+  replaces the internal-ribs behaviour in isolation mode.
 - **Contact and solid layers.** The dissimilar-interface logic (Contact,
   Contact_UP, Solid) is skipped, since nothing dissimilar stacks.
 - **First layer and brim.** Usual first-layer rules, one brim around the

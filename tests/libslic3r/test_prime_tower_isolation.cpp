@@ -18,6 +18,7 @@
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include <vector>
 #include <tuple>
+#include <optional>
 
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
@@ -940,4 +941,94 @@ TEST_CASE("Stock tower honours the brim chamfer flag", "[PrimeTowerIsolation]")
         CHECK(upper_brim > 0);
     else
         CHECK(upper_brim == 0);
+}
+
+TEST_CASE("Isolated section shrinks once a spool of its category is no longer used", "[PrimeTowerIsolation]")
+{
+    // Three filaments: 0 = PLA-A (100) 4 mm cube, 1 = PLA-B (100) 1 mm cube, 2 = PETG (300) 4 mm
+    // cube. While PLA-B prints, the PLA section takes two purges per layer; above 1 mm only one.
+    // The section follows that demand like the stock tower does (never growing upwards), floored
+    // at the minimum section depth, instead of keeping its largest depth to the top. The section
+    // start and the other section stay where they are.
+    DynamicPrintConfig config = two_material_config(true);
+    config.set_num_extruders(3);
+    config.set_num_filaments(3);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_colour")->values = {"#FF0000", "#00FF00", "#0000FF"};
+    config.option<ConfigOptionInts>("filament_adhesiveness_category")->values = {100, 100, 300};
+    config.set("prime_tower_min_section_depth", 1.);
+
+    Model model;
+    const double heights[] = {4., 1., 4.};
+    for (int extruder = 1; extruder <= 3; ++extruder) {
+        ModelObject* obj = model.add_object();
+        obj->add_volume(make_cube(10., 10., heights[extruder - 1]));
+        obj->add_instance();
+        obj->config.set("extruder", extruder);
+        obj->instances.front()->set_offset(Vec3d(40. + 30. * extruder, 50., 0.));
+    }
+    Print print;
+    print.set_status_silent();
+    print.apply(model, config);
+    print.process();
+    const WipeTowerData& data = print.wipe_tower_data();
+    REQUIRE(data.sections.size() == 2);
+    const float pw = tower_line_width(print);
+    const auto layers = segments_per_layer(data);
+    REQUIRE(layers.size() > 8);
+
+    // Wall lines of a category: horizontal segments touching one of the tower's x edges (purge and
+    // fill lines are inset by at least a line width; the entry gap can shorten a wall line at one
+    // end) and not reaching past them (brim loops do). horizontal_wall_ys() is not used here
+    // because it drops lines inside the section's largest extent, which is where a shrunken top
+    // wall lies.
+    const float width = float(print.config().prime_tower_width.value);
+    auto wall_ys = [&](const std::vector<WallSegment>& segs, int category) {
+        std::vector<float> ys;
+        for (const WallSegment& s : segs) {
+            const float x0 = std::min(s.a.x(), s.b.x()), x1 = std::max(s.a.x(), s.b.x());
+            if (category_of(print, s.tool) == category && std::abs(s.a.y() - s.b.y()) < 0.01f && x1 - x0 > 5.f &&
+                x0 > -0.1f && x1 < width + 0.1f && (x0 < 0.05f || x1 > width - 0.05f))
+                ys.push_back(s.a.y());
+        }
+        return ys;
+    };
+    struct Span { float bottom, top; };
+    auto span = [&](size_t li, int category) -> std::optional<Span> {
+        const std::vector<float> ys = wall_ys(layers[li], category);
+        if (ys.empty())
+            return std::nullopt;
+        return Span{*std::min_element(ys.begin(), ys.end()), *std::max_element(ys.begin(), ys.end())};
+    };
+    // Layer 1 (both PLA spools in use) against the last layer with both sections active.
+    const auto low_pla  = span(1, 100);
+    const auto low_petg = span(1, 300);
+    REQUIRE(low_pla.has_value());
+    REQUIRE(low_petg.has_value());
+    size_t high = 0;
+    for (size_t li = layers.size(); li-- > 2;)
+        if (span(li, 100).has_value() && span(li, 300).has_value()) { high = li; break; }
+    REQUIRE(high > 6);
+    const auto high_pla  = span(high, 100);
+    const auto high_petg = span(high, 300);
+    CAPTURE(high, pw, low_pla->bottom, low_pla->top, high_pla->bottom, high_pla->top,
+            low_petg->bottom, low_petg->top, high_petg->bottom, high_petg->top);
+    // The PLA section is at least one line shallower once PLA-B is gone, and starts where it did.
+    CHECK(high_pla->top < low_pla->top - pw + 0.01f);
+    CHECK_THAT(double(high_pla->bottom), WithinAbs(double(low_pla->bottom), 0.01));
+    // The PETG section starts where it did and is no deeper than before.
+    CHECK_THAT(double(high_petg->bottom), WithinAbs(double(low_petg->bottom), 0.01));
+    CHECK(high_petg->top <= low_petg->top + 0.01f);
+    // The reported sections describe the footprint: the largest extent of each over all layers.
+    float pla_top_max = 0.f, petg_top_max = 0.f;
+    for (size_t li = 0; li < layers.size(); ++li) {
+        if (auto s = span(li, 100)) pla_top_max = std::max(pla_top_max, s->top);
+        if (auto s = span(li, 300)) petg_top_max = std::max(petg_top_max, s->top);
+    }
+    const WipeTower2::Section& pla  = section_for(data, 100);
+    const WipeTower2::Section& petg = section_for(data, 300);
+    CHECK_THAT(double(pla.y_start), WithinAbs(double(low_pla->bottom + pw), 0.05));
+    CHECK_THAT(double(pla.y_end), WithinAbs(double(pla_top_max), 0.05));
+    CHECK_THAT(double(petg.y_start), WithinAbs(double(low_petg->bottom + pw), 0.05));
+    CHECK_THAT(double(petg.y_end), WithinAbs(double(petg_top_max), 0.05));
 }

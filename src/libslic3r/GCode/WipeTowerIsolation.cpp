@@ -60,22 +60,25 @@ void WipeTower2::isolation_plan_wall_type()
     }
 }
 
-// Called from generate_wipe_tower_blocks() after the per-layer depths are known. No taper: a
-// section keeps its maximum depth (at least m_min_section_depth) on every layer where its category
-// is active, and ends where the category is no longer active. Each layer's depth also carries the
-// spacing between the sections active on it. Depths are aligned to the line-width grid so that
-// align_perimeter() leaves the section walls where they are laid out; otherwise it would push
-// neighbouring walls into each other and close the air gap.
+// Called from generate_wipe_tower_blocks() after the per-layer depths are known. A section's
+// depth on a layer is what its purges there and above need (the caller has already made the
+// depths non-increasing upwards, as for the stock tower), at least m_min_section_depth; the section
+// ends where its category is no longer active. block.depth, the largest of these, lays out the
+// footprint, so a section that shrinks leaves a gap towards the next one and never moves it. Each
+// layer's depth also carries the spacing between the sections active on it. Depths are aligned to
+// the line-width grid so that align_perimeter() leaves the section walls where they are laid out;
+// otherwise it would push neighbouring walls into each other and close the air gap.
 void WipeTower2::isolation_layout_blocks()
 {
+    auto aligned = [this](float depth) { return std::ceil(std::max(depth, m_min_section_depth) / m_perimeter_width) * m_perimeter_width; };
     for (auto& block : m_wipe_tower_blocks)
-        block.depth = std::ceil(std::max(block.depth, m_min_section_depth) / m_perimeter_width) * m_perimeter_width;
+        block.depth = aligned(block.depth);
     for (size_t layer_id = 0; layer_id < m_plan.size(); ++layer_id) {
         int active = 0;
         m_plan[layer_id].depth = 0;
         for (auto& block : m_wipe_tower_blocks) {
             if (block.layer_depths[layer_id] > WT_EPSILON) {
-                block.layer_depths[layer_id] = block.depth;
+                block.layer_depths[layer_id] = aligned(block.layer_depths[layer_id]);
                 ++active;
             }
             m_plan[layer_id].depth += block.layer_depths[layer_id];
