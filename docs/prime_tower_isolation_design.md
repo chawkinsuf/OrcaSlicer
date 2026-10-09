@@ -198,13 +198,18 @@ isolation off.
   draws around the whole footprint (the first-layer brim, then the chamfer
   that tapers it into the wall over the next few layers when
   `prime_tower_brim_chamfer` is on) are drawn around each section's outline,
-  fins included, right after its wall and in its material, clipped at the
-  midline of the gap on each side shared with a neighbour. So each column
-  has a brim bonded to its own wall, the chamfer stacks on a brim of the
-  same material, and the shared brim pass in `finish_layer_new` draws
-  nothing. The two innermost brim lines lie side by side in the gap on the
-  first layer (and the chamfer lines for a few layers above); that is
-  lateral contact on lines that are peeled off anyway. The
+  fins included, right after its wall and in its material. The innermost
+  loop goes all the way around. On a side shared with a neighbour the outer
+  loops are clipped at the innermost loop's gap-side line, and that line is
+  extended outwards past the footprint as far as the outermost loop (a bar,
+  printed last over the loop ends), so every cut loop ends on its own
+  material and the two sections' bars run parallel; no loose end of one
+  material faces the other. So each column has a brim bonded to its own
+  wall, the chamfer stacks on a brim of the same material, and the shared
+  brim pass in `finish_layer_new` draws nothing. The two innermost brim
+  lines and the two bars lie side by side in the gap on the first layer
+  (and the chamfer lines for a few layers above); that is lateral contact
+  on lines that are peeled off anyway. The
   `prime_tower_brim_chamfer` flag is honoured by the block tower path again
   at the same time; the sync that introduced that path had dropped it.
 - **Contact and solid layers.** The dissimilar-interface logic (Contact,

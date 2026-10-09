@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <set>
 
@@ -193,10 +194,12 @@ Polylines WipeTower2::isolation_section_wall(const WipeTowerBlock& block, WipeTo
 // Called from isolation_section_wall(). Each section has its own brim, printed by its own
 // material right after its wall: the loops the stock tower would draw around the whole footprint
 // (first-layer brim, then the chamfer that tapers it into the wall over the next few layers when
-// prime_tower_brim_chamfer is on) are drawn around this section's outline and clipped at the
-// midline of the gap on each side it shares with a neighbour. The sections are spaced so that
-// the innermost loop of each goes all the way around (see section_spacing()); the outer loops
-// are cut at the midline and only continue outside the footprint.
+// prime_tower_brim_chamfer is on) are drawn around this section's outline. The sections are spaced
+// so that the innermost loop goes all the way around (see section_spacing()). The outer loops
+// cannot: on a side shared with a neighbour they are clipped at the innermost loop's gap-side
+// line, and that line is extended outwards past the footprint as far as the outermost loop (a
+// bar, printed last so it lies over the loop ends). So every cut loop ends on this section's own
+// material, the two neighbours' bars run parallel, and no loose end faces the other material.
 void WipeTower2::isolation_section_brim(const WipeTowerBlock& block, const Polygon& outline, Polylines& paths)
 {
     const float spacing   = m_perimeter_width - m_layer_height * float(1. - M_PI_4);
@@ -216,28 +219,49 @@ void WipeTower2::isolation_section_brim(const WipeTowerBlock& block, const Polyg
     if (loops_num <= 0)
         return;
 
-    // This section's band: from the gap midline below to the gap midline above, open on the
-    // sides where it owns the footprint edge. Midlines come from the laid-out (largest) depths so
-    // that neighbouring bands always meet, whatever a section's depth is on this layer.
+    auto record = [this, &paths](Polyline part) {
+        Polyline recorded = part;
+        recorded.translate(0, scaled(m_y_shift));
+        m_outer_wall[m_z_pos].push_back(recorded);
+        paths.push_back(std::move(part));
+    };
+    auto closed_polyline = [](const Polygon& poly) {
+        Polyline pl = to_polyline(poly);
+        pl.points.push_back(pl.points.front());
+        return pl;
+    };
+
+    // The innermost loop goes all the way around. Its gap-side lines (at the outline's x extent,
+    // which on the gap side is the plain wall, fins being at the owned corners only) are where the
+    // outer loops end and the bars run.
     const bool  first = &block == &m_wipe_tower_blocks.front();
     const bool  last  = &block == &m_wipe_tower_blocks.back();
     const float far   = m_wipe_tower_brim_width + m_rib_length + m_wipe_tower_width + m_wipe_tower_depth;
-    const float half_gap = (section_spacing() - m_perimeter_width) / 2.f; // wall centre to midline
-    const float low  = first ? -far : block.start_depth - m_perimeter_width - half_gap;
-    const float high = last ? m_wipe_tower_depth + far : block.start_depth + block.depth + half_gap;
+    Polygon ring = offset(outline, scaled(spacing)).front();
+    record(closed_polyline(ring));
+    if (loops_num == 1)
+        return;
+    const BoundingBox ring_bbox = get_extents(ring);
+    const float bar_low  = unscaled<float>(ring_bbox.min.y());
+    const float bar_high = unscaled<float>(ring_bbox.max.y());
+    const float low  = first ? -far : bar_low;
+    const float high = last ? m_wipe_tower_depth + far : bar_high;
     Polygon band = generate_rectange_polygon(Vec2f(-far, low), Vec2f(m_wipe_tower_width + far, high));
 
-    Polygon loop = outline;
-    for (int i = 0; i < loops_num; ++i) {
+    Polygon loop = ring;
+    for (int i = 1; i < loops_num; ++i) {
         loop = offset(loop, scaled(spacing)).front();
-        Polyline closed = to_polyline(loop);
-        closed.points.push_back(closed.points.front());
-        for (Polyline& part : intersection_pl(Polylines{closed}, band)) {
-            Polyline recorded = part;
-            recorded.translate(0, scaled(m_y_shift));
-            m_outer_wall[m_z_pos].push_back(recorded);
-            paths.push_back(std::move(part));
-        }
+        for (Polyline& part : intersection_pl(Polylines{closed_polyline(loop)}, band))
+            record(std::move(part));
+    }
+    // Bars: from the innermost loop's side out to the outermost loop's side, on each shared side.
+    const float inner_l = -spacing, inner_r = m_wipe_tower_width + spacing;
+    const float outer_l = -spacing * float(loops_num), outer_r = m_wipe_tower_width + spacing * float(loops_num);
+    for (float y : {first ? std::numeric_limits<float>::quiet_NaN() : bar_low, last ? std::numeric_limits<float>::quiet_NaN() : bar_high}) {
+        if (std::isnan(y))
+            continue;
+        record(Polyline(Point::new_scale(Vec2f(inner_l, y)), Point::new_scale(Vec2f(outer_l, y))));
+        record(Polyline(Point::new_scale(Vec2f(inner_r, y)), Point::new_scale(Vec2f(outer_r, y))));
     }
     if (first_layer) // actual brim width, for the skirt and the preview box (as finish_layer_new does)
         m_wipe_tower_brim_width_real = loops_num * spacing + spacing / 2.f;

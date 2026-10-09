@@ -947,6 +947,67 @@ TEST_CASE("Each isolated section prints its own brim in its own material", "[Pri
     CHECK(misplaced == 0);
 }
 
+TEST_CASE("Outer brim loops of an isolated section end on a bar of its own material", "[PrimeTowerIsolation]")
+{
+    // Only the innermost brim loop of a section goes all the way around. The outer loops are cut
+    // on the gap side, and a loose end facing the neighbour's loose end is where a nozzle catches.
+    // So the innermost loop's gap-side line is extended outwards past the footprint as far as the
+    // outermost loop (a bar), the outer loops are clipped at that bar, and the two sections' bars
+    // run parallel: every cut loop ends on its own material, and no brim of one section reaches
+    // past its bar towards the other.
+    Model model;
+    add_gap_objects(model);
+    Print print;
+    print.set_status_silent();
+    print.apply(model, two_material_config(true));
+    print.process();
+    const WipeTowerData& data = print.wipe_tower_data();
+    REQUIRE(data.sections.size() == 2);
+    const float pw      = tower_line_width(print);
+    const float lh      = float(print.config().initial_layer_print_height.value);
+    const float spacing = pw - lh * float(1. - M_PI_4); // brim loop spacing, as WipeTower2 computes it
+    const int   loops   = int((float(print.config().prime_tower_brim_width.value) + spacing / 2.f) / spacing);
+    REQUIRE(loops >= 3);
+    const float width = float(print.config().prime_tower_width.value);
+    const auto& front = data.sections[0];
+    const auto& back  = data.sections[1];
+    REQUIRE(front.y_end < back.y_start);
+    // Wall centres: the front section's top wall is at its interior end, the back section's bottom
+    // wall one line below its interior start; each bar is one brim spacing beyond its wall.
+    const float bar_front = front.y_end + spacing;
+    const float bar_back  = back.y_start - pw - spacing;
+    const float reach     = float(loops - 1) * spacing; // from the innermost loop to the outermost
+    const auto layers = segments_per_layer(data);
+
+    struct Side { size_t bar_segments = 0; size_t beyond_bar = 0; };
+    auto inspect = [&](int category, float bar_y, bool is_front) {
+        Side out;
+        for (const WallSegment& seg : layers[0]) {
+            if (category_of(print, seg.tool) != category)
+                continue;
+            const float x0 = std::min(seg.a.x(), seg.b.x()), x1 = std::max(seg.a.x(), seg.b.x());
+            // The bar: horizontal, on the bar line, lying outside the footprint and reaching the outermost loop.
+            if (std::abs(seg.a.y() - bar_y) < 0.05f && std::abs(seg.b.y() - bar_y) < 0.05f) {
+                const bool left  = x1 <= 0.05f && x0 <= -reach - spacing + 0.1f;
+                const bool right = x0 >= width - 0.05f && x1 >= width + reach + spacing - 0.1f;
+                if (left || right) ++out.bar_segments;
+            }
+            // Nothing of this section beyond its bar towards the neighbour, on the outside of the footprint.
+            for (const Vec2f& p : {seg.a, seg.b})
+                if ((p.x() < -0.3f || p.x() > width + 0.3f) && (is_front ? p.y() > bar_y + 0.3f : p.y() < bar_y - 0.3f))
+                    ++out.beyond_bar;
+        }
+        return out;
+    };
+    const Side f = inspect(front.category, bar_front, true);
+    const Side b = inspect(back.category, bar_back, false);
+    CAPTURE(spacing, loops, reach, bar_front, bar_back, f.bar_segments, f.beyond_bar, b.bar_segments, b.beyond_bar);
+    CHECK(f.bar_segments >= 2); // left and right
+    CHECK(b.bar_segments >= 2);
+    CHECK(f.beyond_bar == 0);
+    CHECK(b.beyond_bar == 0);
+}
+
 TEST_CASE("Isolated section brim chamfer follows the flag, per section", "[PrimeTowerIsolation]")
 {
     // Each section's chamfer loops stack on its own brim in its own material, so the chamfer is
